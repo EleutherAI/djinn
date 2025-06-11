@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "djinn-framework"
+version = "0.1.0"
+authors = [
+    { name="AI Assistant", email="assistant@example.com" },
+]
+description = "A framework for authoring, validating and distributing programming problems with intended solutions and exploits."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "PyYAML",
+    "datasets",
+    "huggingface-hub",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/EleutherAI/djinn"
+"Bug Tracker" = "https://github.com/EleutherAI/djinn/issues"
+
+[project.scripts]
+djinn = "djinn.core.cli:main" 
