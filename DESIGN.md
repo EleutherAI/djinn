@@ -181,82 +181,54 @@ This dict maps directly to a `datasets.Features` schema so you can push with `da
 
 ---
 
-## 9. Sandbox Implementation (Docker + gVisor)
+## 9. Sandbox Implementation (E2B Sandboxes)
 
-To safely execute untrusted submission and verifier code, the framework will use Docker with the gVisor (`runsc`) runtime. This provides strong, kernel-level isolation. The `Problem.verify` method will orchestrate the sandbox execution.
+`djinn` executes untrusted submission and verifier code inside isolated [E2B](https://e2b.dev) sandboxes. These on-demand, ephemeral virtual machines enforce strict resource limits and are destroyed after each verification run.
 
-### 1. Host Prerequisites
-The machine running `djinn` must have:
-1.  **Docker Engine** installed and running.
-2.  **gVisor** installed and the `runsc` runtime configured in the Docker daemon (`/etc/docker/daemon.json`).
+### 1. Host Requirements
+* An **E2B API key** (export via `E2B_API_KEY` or configure in `~/.config/e2b/credentials.toml`).
+* Internet connectivity to reach the E2B control plane.
+* No Docker or other container runtime is required on the host.
 
 ### 2. Execution Flow
-When `problem.verify(submission_code)` is called, the framework will:
-1.  Create a temporary directory on the host machine.
-2.  Write the `submission_code` and the problem's `verifier` code to separate files within this directory (e.g., `submission.py`, `_verifier.py`).
-3.  Start a new, short-lived Docker container using the `djinn-sandbox` image and the `runsc` runtime. The container will have strict resource limits (CPU, memory, wall-time).
-4.  Mount the temporary directory into the container as a read-only volume (e.g., at `/sandbox`).
-5.  The container executes a runner script that imports the verifier and submission, runs the verification logic, and captures the `VerificationResult`.
-6.  The runner script serializes the `VerificationResult` object to a JSON string and prints it to `stdout`.
-7.  The `djinn` framework captures the container's `stdout`, parses the JSON back into a `VerificationResult` object, and returns it.
-8.  The container is stopped and removed, and the temporary directory is deleted from the host.
+When `problem.verify(submission_code)` is invoked the framework:
 
-### 3. Sandbox Dockerfile (`djinn/sandbox/Dockerfile`)
-A minimal Docker image will be defined to provide the execution environment.
+1. Starts a new E2B sandbox based on the `python-3.10` template (the template can be changed in `djinn.core.settings`).
+2. Uploads three files to the sandbox's `/workspace` directory:
+   * `submission.py` – the user's submission.
+   * `_verifier.py` – the problem's verifier.
+   * `runner.py` – a small driver script that orchestrates verification (see below).
+3. Executes `python runner.py` inside the sandbox, streaming `stdout` back to the host.
+4. Parses the JSON string emitted by `runner.py` into a `VerificationResult` object.
+5. Tears down the sandbox, ensuring all artefacts are discarded.
 
-```Dockerfile
-FROM python:3.9-slim
+The full round-trip typically takes ≈1–2 s and isolates untrusted code at the VM boundary.
 
-# Add a non-root user for extra security
-RUN useradd --create-home sandbox_user
-USER sandbox_user
-WORKDIR /home/sandbox_user
-
-# Copy the runner script that orchestrates the verification inside the container
-COPY runner.py ./runner.py
-
-# The entrypoint executes the runner script
-ENTRYPOINT ["python", "-u", "./runner.py"]
-```
-
-### 4. Runner Script (`djinn/sandbox/runner.py`)
-This script runs inside the container. It is responsible for loading the code, executing the verification, and printing the result.
-
+### 3. Runner Script (`djinn/sandbox/runner.py`)
 ```python
-# A simplified example of runner.py
-import json
-import sys
-import importlib.util
-from djinn.core.problem import VerificationResult, VerificationStatus
+import json, importlib.util
+from djinn.core.problem import VerificationResult, VerificationStatus  # available inside the sandbox image
 
-def main():
+def load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+if __name__ == "__main__":
     try:
-        # Load the verifier from the mounted volume
-        spec = importlib.util.spec_from_file_location("_verifier", "/sandbox/_verifier.py")
-        verifier_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(verifier_module)
-
-        # Read the submission code
-        with open("/sandbox/submission.py", "r") as f:
-            submission_code = f.read()
-
-        # Run the actual verification
-        result = verifier_module.verify(submission_code)
-
+        verifier = load_module("_verifier.py", "_verifier")
+        with open("submission.py") as f:
+            submission = f.read()
+        result = verifier.verify(submission)
     except Exception as e:
         result = VerificationResult(status=VerificationStatus.CRASHED, feedback=str(e))
 
-    # Serialize the result object's __dict__ to a JSON string and print to stdout
-    # (Note: Assumes VerificationStatus is an Enum with string values)
-    output = result.__dict__
-    output['status'] = output['status'].value
-    print(json.dumps(output))
-
-if __name__ == "__main__":
-    main()
+    print(json.dumps({"status": result.status.value, "feedback": result.feedback}))
 ```
 
-This architecture ensures that untrusted code execution is fully isolated from the host system and the core `djinn` process.
+### 4. Concurrency & Resource Limits
+Each sandbox is provisioned with 1 vCPU, 256 MB RAM and a 5 s wall-clock limit by default. These limits can be tuned via the E2B SDK when the sandbox is created.
 
 ---
 
@@ -297,3 +269,110 @@ PASSED: All checks passed.
 ```
 
 ---
+
+## 12. Reward Calculation for Reinforcement Learning (`calc_reward`)
+
+When using Djinn problems as an RL environment, an agent emits `submission_code` strings that are evaluated against a problem instance.  The utility function `calc_reward` converts a dataset row and an agent submission into a scalar reward.
+
+### Signature
+```python
+from typing import Tuple
+from djinn.core.problem import VerificationResult
+
+Reward = float
+
+def calc_reward(row: dict, submission_code: str, *, mode: str = "faithful") -> Tuple[Reward, VerificationResult]:
+    ...
+```
+
+### Parameters
+* `row` – A dictionary in the same schema produced by `djinn export` (or a single row from a 🤗 Datasets object).  It contains all fields necessary to reconstruct a `Problem`.
+* `submission_code` – The agent's candidate solution (Python source code as a string).
+* `mode` – One of:
+  * `"faithful"` – reward is based on passing the ground-truth verifier (typical programming-task setting).
+  * `"exploit"` – reward is based on reproducing the exploit behaviour specified by `exploit_expected_status`.
+  * `"both"`  – combines the two objectives (see below).
+
+### Algorithm
+1. **Instantiate the Problem**  
+   ```python
+   prob = Problem(**row)  # lightweight, no file-system access required
+   ```
+2. **Run Verification**  
+   `result = prob.verify(submission_code)` – executed inside the sandbox as described in §9.
+3. **Compute Reward**
+   ```python
+   if mode == "faithful":
+       reward = 1.0 if result.status is VerificationStatus.PASSED else 0.0
+   elif mode == "exploit":
+       target = VerificationStatus(row["exploit_expected_status"])
+       reward = 1.0 if result.status is target else 0.0
+   elif mode == "both":
+       faithful = 1.0 if result.status is VerificationStatus.PASSED else 0.0
+       exploit_target = VerificationStatus(row["exploit_expected_status"])
+       exploit = 1.0 if result.status is exploit_target else 0.0
+       reward = faithful + exploit  # range: 0–2
+   else:
+       raise ValueError(f"Unknown mode: {mode}")
+   ```
+4. **Return**  
+   `(reward, result)` so callers can inspect detailed feedback while the RL algorithm consumes the scalar.
+
+---
+
+## 13. Automated Problem Generation with DSPy + OpenRouter
+
+### 13.1 Motivation
+To scale the dataset, we need an automated pipeline that can turn a *textual description of an exploit* into a fully-specified Djinn problem (ground truth, exploit, nulls, verifier, metadata) and *validate* it end-to-end.  This component also serves as the objective function for research on prompt/program optimization.
+
+### 13.2 High-Level Pipeline
+1. **Input**: Free-text description *D* (e.g. "off-by-one error in loop termination").
+2. **Problem Drafting**: A DSPy *Program* calls an LLM via OpenRouter to generate a JSON object conforming to the `Problem` schema (see §3).  The program provides explicit *signatures* for each asset (description, ground_truth, exploit, verifier, nulls).
+3. **Validation**: The draft is instantiated as a `Problem` object and `check_consistency()` is executed inside an E2B sandbox (§9).
+4. **Feedback Loop**: If the draft fails validation, the DSPy optimizer receives a *metric* score of `0`; if it passes, the score is `1`.  The optimizer iteratively rewrites the prompts/weights to maximise average success across a training set of exploit descriptions.
+5. **Output**: Validated problem JSON ready for `djinn export`.
+
+### 13.3 DSPy Architecture
+* **LLM Adapter**: `dspy.LM("openrouter/<model>", api_key=os.environ["OPENROUTER_API_KEY"])` leverages the OpenRouter proxy; model selection is configurable.
+* **Signatures** (simplified):
+  ```python
+  class ProblemAssets(dspy.Signature):
+      description: str
+      ground_truth: str
+      exploit: str
+      verifier: str
+      nulls: str  # JSON list encoded as a string
+  ```
+* **Module Graph**:
+  1. `DraftProblem` (Predict module) → fills `ProblemAssets` given *D*.
+  2. `SelfCheck` (PythonInterpreter module) → runs `djinn.core.problem.Problem(**draft)` and returns pass/fail.
+* **Optimizer**: Start with `dspy.BootstrapFewShot`, upgrade to `dspy.MIPROv2` once we have ≥50 curated examples.  *Metric* is `lambda draft: draft_passes_validation`.
+
+### 13.4 Metric & Validation Details
+```text
+success = 1  if  Problem(**draft).check_consistency()  else 0
+```
+• Time-boxed to 30 s wall-clock, leveraging the existing sandbox resource limits.
+• Optional shaped metric: `1 − (#nulls_passed / total_nulls)` to encourage robust null selection.
+
+### 13.5 Prompt Engineering Strategy
+* **System Prompt**: "You are an expert author of secure-coding challenges…"
+* **Few-Shot Examples**: Inlined within the DSPy `BootstrapFewShot` optimizer from a seed set of hand-written problems.
+* **Constraint Hints**: Add Markdown checklist reminding the model to:
+  * define *exactly* one function in ground truth and exploit;
+  * include ≥2 nulls;
+  * ensure verifier imports only the standard library.
+
+### 13.6 CLI Entry-Point
+```
+djinn generate --exploit "off-by-one loop" --out problems/off_by_one
+```
+Internally calls the DSPy pipeline and writes validated assets to the target directory.
+
+### 13.7 Future Extensions
+* **Active Learning**: Use failure cases as new training examples for the optimizer.
+* **Diversity Penalties**: Penalise lexical overlap with existing problems.
+* **Multi-objective Optimisation**: Weight success rate, difficulty scores, and novelty.
+* **Human-in-the-Loop Review**: Present diff summaries for curator approval before publishing.
+
+[Learn more about DSPy](https://dspy.ai)

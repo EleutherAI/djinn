@@ -20,6 +20,10 @@ dependencies = [
     "PyYAML",
     "datasets",
     "huggingface-hub",
+    "e2b-code-interpreter",
+    "python-dotenv",
+    "dspy-ai",
+    "openai",
 ]
 
 [project.urls]

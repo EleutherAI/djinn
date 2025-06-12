@@ -49,13 +49,15 @@ class ProblemRegistry:
         description = config.get("description", "")
         exploit_explanation = config.get("exploit_explanation", "")
         exploit_expected_status = config.get("exploit_expected_status", "passed")
+        insecure_verifier_info = config.get("insecure_verifier_info", "")
         labels = config.get("labels", [])
         gt_difficulty = config.get("gt_difficulty", 1)
         exploit_difficulty = config.get("exploit_difficulty", 1)
 
         ground_truth = self._read_asset(config["ground_truth"], problem_dir)
         exploit = self._read_asset(config["exploit"], problem_dir)
-        verifier = self._read_asset(config["verifier"], problem_dir)
+        secure_verifier = self._read_asset(config["secure_verifier"], problem_dir)
+        insecure_verifier = self._read_asset(config["insecure_verifier"], problem_dir)
 
         # Load nulls
         nulls = []
@@ -72,10 +74,12 @@ class ProblemRegistry:
             ground_truth=ground_truth,
             exploit=exploit,
             nulls=nulls,
-            verifier=verifier,
+            secure_verifier=secure_verifier,
+            insecure_verifier=insecure_verifier,
+            insecure_verifier_info=insecure_verifier_info,
             exploit_explanation=exploit_explanation,
             exploit_expected_status=exploit_expected_status,
-            labels=labels,
+            keywords=labels,
             gt_difficulty=gt_difficulty,
             exploit_difficulty=exploit_difficulty,
         )
