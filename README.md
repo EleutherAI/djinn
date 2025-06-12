@@ -1,4 +1,4 @@
-# Djinn: Exploitable-Verification Coding-Problem Library
+# Djinn: Exploitably verifiable coding problems
 
 Djinn is a lightweight framework for authoring, validating, and distributing programming problems that contain *both* an intended (ground-truth) solution *and* an intentional exploit. Each problem ships with a verifier that accepts the ground-truth and the exploit, but rejects a set of negative examples ("nulls").
 
