@@ -21,7 +21,21 @@ cd djinn
 pip install -e .
 ```
 
-### 2. E2B API Key
+### 2. Get the Problems Directory
+
+The problems are stored in a separate repository as a git submodule. After cloning the main repository, you need to initialize and update the submodule:
+
+```bash
+git submodule update --init --recursive
+```
+
+If you're cloning for the first time, you can also clone with submodules in one step:
+
+```bash
+git clone --recurse-submodules https://github.com/EleutherAI/djinn
+```
+
+### 3. E2B API Key
 
 Djinn uses E2B for sandboxed code execution. You will need an API key to run the verification steps.
 

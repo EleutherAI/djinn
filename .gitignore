@@ -67,3 +67,7 @@ dataset.jsonl
 .idea/
 *.swp
 *.swo 
+
+# Store the generated dataset elsewhere
+problems/*
+generated_problems/*
