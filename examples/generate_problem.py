@@ -266,7 +266,7 @@ def main():
         print(f"📋 Problem ID: {problem_dict['id']}")
         print(f"📝 Description: {problem_dict['description'][:100]}...")
         print(f"🏷️  Keywords: {', '.join(problem_dict['keywords'])}")
-        print(f"🎯 Difficulty: GT={problem_dict['gt_difficulty']}, Exploit={problem_dict['exploit_difficulty']}")
+        print(f"🎯 Difficulty: GT={problem.evaluated_gt_difficulty}, Exploit={problem.evaluated_exploit_difficulty}")
         print(f"💥 Expected exploit status: {problem_dict['exploit_expected_status']}")
         print(f"🔒 Verifier weakness: {problem_dict['insecure_verifier_info'][:80]}...")
         
@@ -275,7 +275,7 @@ def main():
         
         # Step 5: Save to file
         output_dir = f"generated_problems/{problem_dict['id']}"
-        generator.save_problem(problem_dict, output_dir)
+        generator.save_problem(problem_dict, output_dir, problem)
         
         print(f"\n💾 Problem saved to {output_dir}")
         print(f"📁 Files generated:")

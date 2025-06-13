@@ -17,8 +17,6 @@ def export_problems_to_jsonl(file_path: str):
                 "exploit_explanation": problem.exploit_explanation,
                 "exploit_expected_status": problem.exploit_expected_status,
                 "keywords": problem.keywords,
-                "gt_difficulty": problem.gt_difficulty,
-                "exploit_difficulty": problem.exploit_difficulty,
                 "evaluated_gt_difficulty": problem.evaluated_gt_difficulty,
                 "evaluated_exploit_difficulty": problem.evaluated_exploit_difficulty,
                 "gt_model_results": problem.gt_model_results,

@@ -6,8 +6,9 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import dspy
+from datasets import load_dataset
 from .modules import ProblemGenerationPipeline
-from .importer import PrimeIntellectImporter
+from ..core.problem import Problem
 import time
 
 
@@ -78,11 +79,20 @@ class ProblemGenerator:
             Dictionary containing the generated problem and metadata
         """
         
+        failure_feedback = []  # Accumulate feedback from failed attempts
+        
         for attempt in range(max_attempts):
-            print(f"🔄 Generation attempt {attempt + 1}/{max_attempts}")
+            print(f"🔄 Generation attempt {attempt + 1}/{max_attempts}, failure feedback: {failure_feedback}")
             
-            # Run the generation pipeline
-            result = self.pipeline(exploit_description)
+            # Pass failure feedback to the pipeline instead of modifying the description
+            if failure_feedback:
+                print(f"📝 Incorporating feedback from {len(failure_feedback)} previous failure(s)")
+            
+            # Run the generation pipeline with failure feedback (full generation mode)
+            result = self.pipeline(
+                exploit_description=exploit_description,
+                failure_feedback=failure_feedback
+            )
             
             if result["success"]:
                 print("✅ Problem generated and validated successfully!")
@@ -105,18 +115,98 @@ class ProblemGenerator:
                     "problem": result["problem"],
                     "validation_feedback": result["validation_feedback"],
                     "evaluation_result": result.get("evaluation_result"),
-                    "attempts": attempt + 1
+                    "attempts": attempt + 1,
+                    "failure_history": failure_feedback  # Include failure history for debugging
                 }
             else:
-                print(f"❌ Attempt {attempt + 1} failed: {result.get('error', result.get('validation_feedback', 'Unknown error'))}")
+                # Extract detailed failure reason
+                failure_reason = result.get('error', result.get('validation_feedback', 'Unknown error'))
+                print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
+                
+                # Add to failure feedback for next attempt
+                failure_feedback.append(failure_reason)
                 
                 if attempt < max_attempts - 1:
-                    print("🔄 Retrying...")
+                    print("🔄 Retrying with enhanced feedback...")
         
         return {
             "success": False,
             "error": f"Failed to generate valid problem after {max_attempts} attempts",
-            "attempts": max_attempts
+            "attempts": max_attempts,
+            "failure_history": failure_feedback  # Include all failure reasons for debugging
+        }
+    
+    def generate_from_components(self, exploit_description: str, problem_description: str = "", 
+                                ground_truth_solution: str = "", max_attempts: int = 3) -> Dict[str, Any]:
+        """
+        Generate verifiers and exploits from existing problem components (unified import-style generation).
+        
+        Args:
+            exploit_description: Description of the vulnerability to introduce
+            problem_description: Existing problem description (if available)
+            ground_truth_solution: Existing ground truth solution (if available)
+            max_attempts: Maximum number of generation attempts
+            
+        Returns:
+            Dictionary containing the generated problem and metadata
+        """
+        
+        failure_feedback = []  # Accumulate feedback from failed attempts
+        
+        for attempt in range(max_attempts):
+            print(f"🔄 Generation attempt {attempt + 1}/{max_attempts} (import mode)")
+            
+            if failure_feedback:
+                print(f"📝 Incorporating feedback from {len(failure_feedback)} previous failure(s)")
+            
+            # Run the generation pipeline in import mode
+            result = self.pipeline(
+                exploit_description=exploit_description,
+                problem_description=problem_description,
+                ground_truth_solution=ground_truth_solution,
+                failure_feedback=failure_feedback
+            )
+            
+            if result["success"]:
+                print("✅ Problem generated and validated successfully!")
+                
+                # Run detailed evaluation if enabled
+                if self.enable_evaluation and result.get("problem"):
+                    print("🔍 Running detailed evaluation...")
+                    try:
+                        eval_result = self.evaluator.evaluate_problem(result["problem"], quick=False)
+                        result["problem"].apply_evaluation_results(eval_result)
+                        result["evaluation_result"] = eval_result
+                        print("✅ Detailed evaluation complete!")
+                    except Exception as e:
+                        print(f"⚠️  Evaluation failed: {e}")
+                        result["evaluation_error"] = str(e)
+                
+                return {
+                    "success": True,
+                    "problem_dict": result["problem_dict"],
+                    "problem": result["problem"],
+                    "validation_feedback": result["validation_feedback"],
+                    "evaluation_result": result.get("evaluation_result"),
+                    "attempts": attempt + 1,
+                    "failure_history": failure_feedback
+                }
+            else:
+                # Extract detailed failure reason
+                failure_reason = result.get('error', result.get('validation_feedback', 'Unknown error'))
+                print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
+                
+                # Add to failure feedback for next attempt
+                failure_feedback.append(failure_reason)
+                
+                if attempt < max_attempts - 1:
+                    print("🔄 Retrying with enhanced feedback...")
+        
+        return {
+            "success": False,
+            "error": f"Failed to generate valid problem after {max_attempts} attempts",
+            "attempts": max_attempts,
+            "failure_history": failure_feedback
         }
     
     def optimize_pipeline(self, training_examples: List[Dict[str, Any]], optimizer_type: str = "bootstrap"):
@@ -260,13 +350,14 @@ class ProblemGenerator:
         self.pipeline = optimizer.compile(self.pipeline, trainset=trainset)
         print("✅ Pipeline optimization complete!")
     
-    def save_problem(self, problem_dict: Dict[str, Any], output_dir: str):
+    def save_problem(self, problem_dict: Dict[str, Any], output_dir: str, problem_obj: Optional[Problem] = None):
         """
         Save a generated problem to the filesystem in Djinn format.
         
         Args:
             problem_dict: Problem dictionary from generate_problem
             output_dir: Directory to save the problem (will be created if needed)
+            problem_obj: Problem object (optional, for evaluation results)
         """
         
         output_path = Path(output_dir)
@@ -279,8 +370,6 @@ class ProblemGenerator:
             "exploit_explanation": problem_dict["exploit_explanation"],
             "exploit_expected_status": problem_dict["exploit_expected_status"],
             "keywords": problem_dict["keywords"],
-            "gt_difficulty": problem_dict["gt_difficulty"],
-            "exploit_difficulty": problem_dict["exploit_difficulty"],
             # Inline the code assets
             "ground_truth": problem_dict["ground_truth"],
             "exploit": problem_dict["exploit"],
@@ -290,16 +379,18 @@ class ProblemGenerator:
             "nulls": problem_dict["nulls"]
         }
         
-        # Add evaluation results if available
-        eval_fields = [
-            "evaluated_gt_difficulty", "evaluated_exploit_difficulty", 
-            "gt_model_results", "exploit_model_results",
-            "vuln_cheatiness", "exploit_fairness", "problem_quality", 
-            "problem_appears_as", "exploit_finding_appearance"
-        ]
-        for field in eval_fields:
-            if field in problem_dict and problem_dict[field] is not None:
-                problem_yaml[field] = problem_dict[field]
+        # Add evaluation results if available from the Problem object
+        if problem_obj:
+            eval_fields = [
+                "evaluated_gt_difficulty", "evaluated_exploit_difficulty", 
+                "gt_model_results", "exploit_model_results",
+                "vuln_cheatiness", "exploit_fairness", "problem_quality", 
+                "problem_appears_as", "exploit_finding_appearance"
+            ]
+            for field in eval_fields:
+                value = getattr(problem_obj, field, None)
+                if value is not None:
+                    problem_yaml[field] = value
         
         # Write problem.yaml
         with open(output_path / "problem.yaml", "w") as f:
@@ -326,11 +417,17 @@ class ProblemGenerator:
         result = self.generate_problem(exploit_description, max_attempts)
         
         if result["success"]:
-            self.save_problem(result["problem_dict"], output_dir)
+            self.save_problem(result["problem_dict"], output_dir, result.get("problem"))
             print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
+            if result.get("failure_history"):
+                print(f"   📝 Overcame {len(result['failure_history'])} previous failure(s)")
             return True
         else:
             print(f"💥 Problem generation failed: {result['error']}")
+            if result.get("failure_history"):
+                print(f"📋 Failure history:")
+                for i, failure in enumerate(result["failure_history"]):
+                    print(f"   {i+1}. {failure}")
             return False 
     
     def save_optimized_generator(self, name: str, save_dir: str = "optimized_generators", 
@@ -399,6 +496,40 @@ class ProblemGenerator:
         
         print(f"✅ Loaded optimized generator '{name}' successfully!")
     
+    def _load_dataset(self, split: str = "train", streaming: bool = False):
+        """Load the PrimeIntellect dataset."""
+        try:
+            dataset = load_dataset("PrimeIntellect/verifiable-coding-problems", split=split, streaming=streaming)
+            return dataset
+        except Exception as e:
+            raise Exception(f"Failed to load dataset: {e}")
+    
+    def _get_problem_by_id(self, problem_id: str, split: str = "train"):
+        """Get a specific problem by its ID from the dataset."""
+        dataset = self._load_dataset(split=split, streaming=True)
+        
+        for row in dataset:
+            if row.get("problem_id") == problem_id:
+                return row
+        
+        raise ValueError(f"Problem with ID '{problem_id}' not found in dataset")
+    
+    def _sample_problems(self, n: int = 5, split: str = "train", filter_with_ground_truth: bool = False):
+        """Sample n problems from the dataset."""
+        dataset = self._load_dataset(split=split, streaming=True)
+        samples = []
+        
+        for i, row in enumerate(dataset):
+            if filter_with_ground_truth and not row.get("gold_standard_solution"):
+                continue
+                
+            samples.append(row)
+            
+            if len(samples) >= n:
+                break
+        
+        return samples
+    
     @classmethod
     def from_saved_generator(cls, name: str, save_dir: str = "optimized_generators", 
                            api_key: Optional[str] = None):
@@ -453,4 +584,191 @@ class ProblemGenerator:
             except Exception as e:
                 print(f"Warning: Could not load metadata from {metadata_file}: {e}")
         
-        return generators 
+        return generators
+    
+    def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
+                                  exploit_description: str = "", output_dir: str = None, 
+                                  provided_exploit: str = "", provided_insecure_verifier: str = "",
+                                  provided_secure_verifier: str = "", max_attempts: int = 3) -> Dict[str, Any]:
+        """
+        Import a problem from the PrimeIntellect dataset and generate verifiers/exploits.
+        
+        Args:
+            problem_id: Specific problem ID to import (optional)
+            row: Direct dataset row to import (optional, overrides problem_id)
+            exploit_description: Description of the vulnerability to introduce (required)
+            output_dir: Directory to save the problem (optional)
+            provided_exploit: Pre-written exploit code (optional)
+            provided_insecure_verifier: Pre-written insecure verifier (optional)
+            provided_secure_verifier: Pre-written secure verifier (optional)
+            max_attempts: Maximum generation attempts
+            
+        Returns:
+            Dictionary containing the import result
+        """
+        
+        if not exploit_description:
+            raise ValueError("exploit_description is required - specify what vulnerability to introduce")
+        
+        try:
+            # Get the row to import
+            if row is None:
+                if problem_id is None:
+                    raise ValueError("Either problem_id or row must be provided")
+                print(f"🔍 Looking for problem ID '{problem_id}' in dataset...")
+                row = self._get_problem_by_id(problem_id)
+            
+            print(f"📥 Importing problem from PrimeIntellect dataset...")
+            if row.get("source"):
+                print(f"   Source: {row['source']}")
+            if row.get("problem_id"):
+                print(f"   Original ID: {row['problem_id']}")
+            
+            prompt = row.get("prompt", "")
+            ground_truth = row.get("gold_standard_solution", "")
+            
+            if not prompt:
+                return {
+                    "success": False,
+                    "error": "No prompt found in dataset row"
+                }
+            
+            print(f"🔄 Importing problem from dataset...")
+            print(f"📋 Prompt length: {len(prompt)} characters")
+            print(f"💡 Ground truth available: {'Yes' if ground_truth else 'No'}")
+            print(f"🎯 Exploit description: {exploit_description}")
+            provided_components = ', '.join(filter(None, [
+                'exploit' if provided_exploit else '',
+                'insecure_verifier' if provided_insecure_verifier else '',
+                'secure_verifier' if provided_secure_verifier else ''
+            ])) or 'None - will generate all'
+            print(f"🔧 Provided components: {provided_components}")
+            
+            # Use the unified pipeline to generate missing components
+            result = self.generate_from_components(
+                exploit_description=exploit_description,
+                problem_description=prompt,
+                ground_truth_solution=ground_truth,
+                max_attempts=max_attempts
+            )
+            
+            if result["success"]:
+                problem_dict = result["problem_dict"]
+                
+                # Override with provided components if available
+                if provided_exploit:
+                    problem_dict["exploit"] = provided_exploit
+                if provided_insecure_verifier:
+                    problem_dict["insecure_verifier"] = provided_insecure_verifier
+                if provided_secure_verifier:
+                    problem_dict["secure_verifier"] = provided_secure_verifier
+                
+                print("✅ Problem imported successfully!")
+                
+                # Re-validate if we overrode components
+                if provided_exploit or provided_insecure_verifier or provided_secure_verifier:
+                    try:
+                        from ..core.problem import Problem
+                        problem = Problem(**problem_dict)
+                        validation_passed = problem.check_consistency()
+                        if not validation_passed:
+                            print("⚠️  Warning: Validation failed after component override")
+                        result["problem"] = problem
+                        result["problem_dict"] = problem_dict
+                    except Exception as e:
+                        print(f"⚠️  Warning: Re-validation failed: {e}")
+                
+                # Save to filesystem if output_dir provided
+                if output_dir:
+                    self.save_problem(result["problem_dict"], output_dir, result.get("problem"))
+                    print(f"💾 Problem saved to {output_dir}")
+                
+                # Add source metadata
+                result["source_metadata"] = {
+                    "source": row.get("source", "unknown"),
+                    "original_problem_id": row.get("problem_id", "unknown"),
+                    "task_type": row.get("task_type", "unknown"),
+                    "metadata": row.get("metadata", {}),
+                    "exploit_description": exploit_description,
+                    "provided_components": {
+                        "exploit": bool(provided_exploit),
+                        "insecure_verifier": bool(provided_insecure_verifier),
+                        "secure_verifier": bool(provided_secure_verifier)
+                    }
+                }
+                
+                return result
+            else:
+                print(f"❌ Import failed: {result['error']}")
+                return result
+                
+        except Exception as e:
+            error_msg = f"Import failed: {str(e)}"
+            print(f"❌ {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg
+            }
+    
+    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
+                         max_attempts: int = 3) -> List[Dict[str, Any]]:
+        """
+        Sample and import multiple problems from the PrimeIntellect dataset.
+        
+        Args:
+            exploit_description: Description of the vulnerability to introduce (required)
+            n: Number of problems to sample and import
+            filter_with_ground_truth: Only sample problems that have ground truth solutions
+            max_attempts: Maximum generation attempts per problem
+            
+        Returns:
+            List of import results
+        """
+        
+        if not exploit_description:
+            raise ValueError("exploit_description is required - specify what vulnerability to introduce")
+        
+        print(f"🎲 Sampling {n} problems from PrimeIntellect dataset...")
+        print(f"   Filter for ground truth: {'Yes' if filter_with_ground_truth else 'No'}")
+        print(f"🎯 Exploit type: {exploit_description}")
+        
+        try:
+            samples = self._sample_problems(n=n, filter_with_ground_truth=filter_with_ground_truth)
+            print(f"📋 Found {len(samples)} problems to import")
+            
+            results = []
+            for i, row in enumerate(samples):
+                print(f"\n{'='*60}")
+                print(f"IMPORTING PROBLEM {i+1}/{len(samples)}")
+                print(f"{'='*60}")
+                
+                result = self.import_from_prime_intellect(
+                    row=row, 
+                    exploit_description=exploit_description,
+                    max_attempts=max_attempts
+                )
+                results.append(result)
+                
+                if result["success"]:
+                    print(f"✅ Problem {i+1}/{len(samples)} imported successfully!")
+                else:
+                    print(f"❌ Problem {i+1}/{len(samples)} failed to import: {result.get('error', 'Unknown error')}")
+            
+            # Summary
+            successful = sum(1 for r in results if r["success"])
+            print(f"\n{'='*60}")
+            print(f"IMPORT SUMMARY")
+            print(f"{'='*60}")
+            print(f"Total problems: {len(results)}")
+            print(f"Successful imports: {successful}")
+            print(f"Failed imports: {len(results) - successful}")
+            
+            return results
+            
+        except Exception as e:
+            error_msg = f"Sampling and import failed: {str(e)}"
+            print(f"❌ {error_msg}")
+            return [{
+                "success": False,
+                "error": error_msg
+            }] 

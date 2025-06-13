@@ -46,8 +46,8 @@ class ProblemEvaluator:
         "openrouter/qwen/qwen3-32b",  # small-med
         "openrouter/x-ai/grok-3-mini-beta",  # med
         "openrouter/google/gemini-2.5-flash-preview-05-20",  # med
+        "openrouter/deepseek/deepseek-r1-0528",  # med
         "openrouter/anthropic/claude-sonnet-4",  # large
-        "openrouter/deepseek/deepseek-r1-0528",  # large
         "openrouter/google/gemini-2.5-pro-preview",  # large
     ]
     
@@ -61,16 +61,15 @@ class ProblemEvaluator:
     
     def _setup_model(self, model_name: str) -> dspy.LM:
         """Setup DSPy with specific OpenRouter model"""
-        # Set higher max_tokens for qwen and deepseek-r1 models
-        max_tokens = 4000  # default
-        if "qwen" in model_name.lower() or "deepseek-r1" in model_name.lower():
-            max_tokens = 16000
+        max_tokens = 16000  # default
+
             
         return dspy.LM(
             model=model_name,
             api_key=self.api_key,
             api_base="https://openrouter.ai/api/v1",
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            temperature=0.6
         )
     
     def evaluate_gt_difficulty(self, problem: Problem) -> tuple[int, Dict[str, bool]]:

@@ -28,8 +28,6 @@ class Problem:
     exploit_explanation: str
     exploit_expected_status: str = "passed" # e.g. "passed", "timed_out", "crashed"
     keywords: List[str] = field(default_factory=list)
-    gt_difficulty: int = 1
-    exploit_difficulty: int = 1
     # Detailed evaluation fields
     evaluated_gt_difficulty: Optional[int] = None
     evaluated_exploit_difficulty: Optional[int] = None

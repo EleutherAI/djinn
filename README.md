@@ -61,6 +61,17 @@ Djinn uses E2B for sandboxed code execution. You will need an API key to run the
 
 If the `E2B_API_KEY` is not set, Djinn will fall back to running code locally using `exec`, which is **insecure** and not recommended.
 
+## CLI Reference
+
+Djinn provides several commands for managing coding problems:
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `djinn new <slug>` | Create new problem | `djinn new my-problem` |
+| `djinn check <slug>` | Validate problem consistency | `djinn check palindrome --eval` |
+| `djinn generate` | Generate/import problems with AI | `djinn generate --exploit-list-file exploits.txt --generator` |
+| `djinn export` | Export to JSONL/Hugging Face | `djinn export --hf-repo "user/dataset"` |
+
 ## Usage
 
 ### Create a New Problem
@@ -78,6 +89,32 @@ Run the verifier against the ground truth, exploit, and nulls to ensure they all
 ```bash
 djinn check palindrome
 ```
+
+For detailed evaluation (requires `dspy-ai` and OpenRouter API key):
+
+```bash
+djinn check palindrome --eval --quick
+```
+
+### Generate Problems with AI
+
+Generate complete coding problems from textual descriptions of exploits using AI.
+
+**Basic usage:**
+
+```bash
+djinn generate --exploit "off-by-one error in loop termination" --out problems/off_by_one
+```
+
+**Prerequisites:** Requires `dspy-ai`, `openai`, and an OpenRouter API key:
+```bash
+pip install dspy-ai openai
+export OPENROUTER_API_KEY="your-api-key-here"
+```
+
+The generation system supports multiple modes including full generation from scratch, mixed generation with pre-specified components, dataset import, optimized generators, and batch generation from file.
+
+📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
 
 ### Export Problems
 

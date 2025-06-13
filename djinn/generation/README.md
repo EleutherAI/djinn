@@ -18,18 +18,94 @@ export OPENROUTER_API_KEY="your-api-key-here"
 
 ### CLI Usage
 
-Generate a problem using the command line:
+The `djinn generate` command supports multiple modes for creating problems:
+
+#### 1. Full Generation (from scratch)
+
+Generate a complete problem from just an exploit description:
 
 ```bash
 djinn generate --exploit "off-by-one error in loop termination" --out problems/off_by_one
 ```
 
-Options:
+#### 2. Mixed Generation (with pre-specified components)
+
+Provide your own components and let AI generate the rest:
+
+```bash
+# Use your problem description and ground truth, generate verifiers/exploit
+djinn generate --exploit "buffer overflow" --out problems/mixed \
+  --problem-description-file my_problem.txt \
+  --ground-truth-file my_solution.py
+
+# Override generated exploit with your own
+djinn generate --exploit "timing attack" --out problems/custom \
+  --exploit-file my_exploit.py
+```
+
+#### 3. Dataset Import (from PrimeIntellect)
+
+Import problems from external datasets:
+
+```bash
+# Import specific problem by ID
+djinn generate --exploit "weak input validation" --problem-id "problem_123" --out problems/imported
+
+# Sample multiple problems randomly
+djinn generate --exploit "race condition vulnerability" --sample 5
+```
+
+#### Using Optimized Generators (recommended for better quality)
+
+```bash
+# Interactive menu to select optimization options
+djinn generate --exploit "buffer overflow in string handling" --out problems/buffer_overflow --generator
+
+# Available generator options:
+# 1. No optimization (default)
+# 2. Optimize fresh (create new optimized generator)  
+# 3. Load existing optimized generator
+
+# Load a specific saved generator
+djinn generate --exploit "timing vulnerability" --out problems/timing --generator my_custom_generator
+```
+
+#### Batch Generation from File
+
+Create a text file with exploit descriptions (one per line):
+```text
+# exploits.txt
+buffer overflow in string concatenation
+off-by-one error in array indexing
+race condition in concurrent access
+weak input validation allowing injection
+timing vulnerability in authentication
+```
+
+Then run batch generation:
+```bash
+# Generate 1 problem per exploit (default)
+djinn generate --exploit-list-file exploits.txt --generator
+
+# Generate multiple problems per exploit
+djinn generate --exploit-list-file exploits.txt --batch-sample-size 3 --generator
+
+# With custom output directory
+djinn generate --exploit-list-file exploits.txt --out my_problems --batch-sample-size 2
+```
+
+**Output Structure**:
+- Single problem: Saved to specified `--out` directory
+- Batch generation: Saved to `{base_dir}/exploit_{num}_sample_{num}` subdirectories
+
+#### Command Line Options
+
 - `--exploit`: Description of the exploit to implement (required)
 - `--out`: Output directory for the generated problem (required)
-- `--model`: OpenRouter model to use (default: `openrouter/anthropic/claude-sonnet-4`)
-- `--api-key`: API key if not set via environment variable
+- `--model`: OpenRouter model (default: `openrouter/anthropic/claude-sonnet-4`)
 - `--max-attempts`: Maximum generation attempts (default: 3)
+- `--eval`: Run detailed evaluation during generation
+- `--api-key`: API key if not set via environment variable
 
 ### Programmatic Usage
 
