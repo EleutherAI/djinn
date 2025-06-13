@@ -19,6 +19,15 @@ def export_problems_to_jsonl(file_path: str):
                 "keywords": problem.keywords,
                 "gt_difficulty": problem.gt_difficulty,
                 "exploit_difficulty": problem.exploit_difficulty,
+                "evaluated_gt_difficulty": problem.evaluated_gt_difficulty,
+                "evaluated_exploit_difficulty": problem.evaluated_exploit_difficulty,
+                "gt_model_results": problem.gt_model_results,
+                "exploit_model_results": problem.exploit_model_results,
+                "vuln_cheatiness": problem.vuln_cheatiness,
+                "exploit_fairness": problem.exploit_fairness,
+                "problem_quality": problem.problem_quality,
+                "problem_appears_as": problem.problem_appears_as,
+                "exploit_finding_appearance": problem.exploit_finding_appearance,
             }
             f.write(json.dumps(problem_dict) + "\n")
 
@@ -38,6 +47,15 @@ def export_to_huggingface(repo_id: str, private: bool = False):
         "keywords": [],
         "gt_difficulty": [],
         "exploit_difficulty": [],
+        "evaluated_gt_difficulty": [],
+        "evaluated_exploit_difficulty": [],
+        "gt_model_results": [],
+        "exploit_model_results": [],
+        "vuln_cheatiness": [],
+        "exploit_fairness": [],
+        "problem_quality": [],
+        "problem_appears_as": [],
+        "exploit_finding_appearance": [],
     }
 
     for problem in registry:

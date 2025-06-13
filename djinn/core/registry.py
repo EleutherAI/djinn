@@ -82,6 +82,16 @@ class ProblemRegistry:
             keywords=labels,
             gt_difficulty=gt_difficulty,
             exploit_difficulty=exploit_difficulty,
+            # Load evaluation fields if present
+            evaluated_gt_difficulty=config.get("evaluated_gt_difficulty"),
+            evaluated_exploit_difficulty=config.get("evaluated_exploit_difficulty"),
+            gt_model_results=config.get("gt_model_results"),
+            exploit_model_results=config.get("exploit_model_results"),
+            vuln_cheatiness=config.get("vuln_cheatiness"),
+            exploit_fairness=config.get("exploit_fairness"),
+            problem_quality=config.get("problem_quality"),
+            problem_appears_as=config.get("problem_appears_as"),
+            exploit_finding_appearance=config.get("exploit_finding_appearance"),
         )
 
     def __getitem__(self, key: str) -> Problem:

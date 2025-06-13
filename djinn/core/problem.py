@@ -3,7 +3,7 @@ import json
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 from dotenv import load_dotenv
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult
 from e2b import Sandbox
@@ -30,6 +30,16 @@ class Problem:
     keywords: List[str] = field(default_factory=list)
     gt_difficulty: int = 1
     exploit_difficulty: int = 1
+    # Detailed evaluation fields
+    evaluated_gt_difficulty: Optional[int] = None
+    evaluated_exploit_difficulty: Optional[int] = None
+    gt_model_results: Optional[Dict[str, bool]] = None
+    exploit_model_results: Optional[Dict[str, bool]] = None
+    vuln_cheatiness: Optional[float] = None
+    exploit_fairness: Optional[float] = None
+    problem_quality: Optional[float] = None
+    problem_appears_as: Optional[str] = None
+    exploit_finding_appearance: Optional[float] = None
 
     def _verify_local(self, submission_code: str) -> "VerificationResult":
         """
@@ -173,3 +183,24 @@ class Problem:
             print("FAILED: One or more null checks failed.")
 
         return all_nulls_passed 
+    
+    def apply_evaluation_results(self, eval_result: "EvaluationResult"):
+        """Apply evaluation results to this problem instance"""
+        if eval_result.gt_difficulty is not None:
+            self.evaluated_gt_difficulty = eval_result.gt_difficulty
+        if eval_result.exploit_difficulty is not None:
+            self.evaluated_exploit_difficulty = eval_result.exploit_difficulty
+        if eval_result.gt_model_results:
+            self.gt_model_results = eval_result.gt_model_results
+        if eval_result.exploit_model_results:
+            self.exploit_model_results = eval_result.exploit_model_results
+        if eval_result.vuln_cheatiness is not None:
+            self.vuln_cheatiness = eval_result.vuln_cheatiness
+        if eval_result.exploit_fairness is not None:
+            self.exploit_fairness = eval_result.exploit_fairness
+        if eval_result.problem_quality is not None:
+            self.problem_quality = eval_result.problem_quality
+        if eval_result.problem_appears_as is not None:
+            self.problem_appears_as = eval_result.problem_appears_as
+        if eval_result.exploit_finding_appearance is not None:
+            self.exploit_finding_appearance = eval_result.exploit_finding_appearance 
