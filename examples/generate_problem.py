@@ -256,7 +256,7 @@ def main():
     print(f"🎯 Exploit: {exploit_description}")
     
     # Step 3: Generate the problem
-    result = generator.generate_problem(exploit_description, max_attempts=3)
+    result = generator.generate_problem(exploit_description)
     
     if result["success"]:
         problem_dict = result["problem_dict"]

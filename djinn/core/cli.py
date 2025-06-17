@@ -179,7 +179,6 @@ def handle_generate(args):
             getattr(args, 'ground_truth_file', None),
             getattr(args, 'exploit_file', None),
             getattr(args, 'insecure_verifier_file', None),
-            getattr(args, 'secure_verifier_file', None)
         ])
         
         # Validate argument combinations
@@ -253,7 +252,6 @@ def load_component_files(args):
         ('ground_truth', 'ground_truth_file'),
         ('exploit', 'exploit_file'),
         ('insecure_verifier', 'insecure_verifier_file'),
-        ('secure_verifier', 'secure_verifier_file')
     ]
     
     for component_name, arg_name in component_files:
@@ -299,8 +297,6 @@ def handle_single_generate(args, generator):
                 problem_dict['exploit'] = components['exploit']
             if components.get('insecure_verifier'):
                 problem_dict['insecure_verifier'] = components['insecure_verifier']
-            if components.get('secure_verifier'):
-                problem_dict['secure_verifier'] = components['secure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -319,7 +315,7 @@ def handle_single_generate(args, generator):
             print("⚠️  Warning: Component files provided but no problem description - will generate from scratch")
             print("   Provided components will override generated ones")
         
-        result = generator.generate_problem(args.exploit, max_attempts=args.max_attempts)
+        result = generator.generate_problem(args.exploit)
         
         if result["success"]:
             problem_dict = result["problem_dict"]
@@ -329,8 +325,6 @@ def handle_single_generate(args, generator):
                 problem_dict['exploit'] = components['exploit']
             if components.get('insecure_verifier'):
                 problem_dict['insecure_verifier'] = components['insecure_verifier']
-            if components.get('secure_verifier'):
-                problem_dict['secure_verifier'] = components['secure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -351,7 +345,6 @@ def handle_dataset_import(args, generator):
             exploit_description=args.exploit,
             n=args.sample,
             filter_with_ground_truth=args.filter_ground_truth,
-            max_attempts=args.max_attempts
         )
         
         successful = sum(1 for r in results if r.get("success", False))
@@ -369,7 +362,6 @@ def handle_dataset_import(args, generator):
             output_dir=args.out,
             provided_exploit=components.get('exploit', ''),
             provided_insecure_verifier=components.get('insecure_verifier', ''),
-            provided_secure_verifier=components.get('secure_verifier', ''),
             max_attempts=args.max_attempts
         )
         

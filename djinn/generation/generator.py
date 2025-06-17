@@ -4,10 +4,12 @@ import os
 import json
 import yaml
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import dspy
 from datasets import load_dataset
 from .modules import ProblemGenerationPipeline
+from .verifier import verify_problem_consistency
+from .generator_utils import TestCaseGenerator
 from ..core.problem import Problem
 import time
 
@@ -44,8 +46,11 @@ class ProblemGenerator:
         # Configure DSPy with OpenRouter
         self._setup_dspy()
         
-        # Initialize the generation pipeline
-        self.pipeline = ProblemGenerationPipeline()
+        # Initialize test case generator with DSPy tools
+        self.test_case_generator = TestCaseGenerator()
+        
+        # Initialize the generation pipeline with tools
+        self.pipeline = ProblemGenerationPipeline(tools=self.test_case_generator.tools).compile_with_examples()
         
         # Initialize evaluator if needed
         if self.enable_evaluation:
@@ -67,7 +72,7 @@ class ProblemGenerator:
         )
         dspy.configure(lm=lm)
     
-    def generate_problem(self, exploit_description: str, max_attempts: int = 3) -> Dict[str, Any]:
+    def generate_problem(self, exploit_description: str) -> Dict[str, Any]:
         """
         Generate a complete problem from an exploit description.
         
@@ -78,63 +83,69 @@ class ProblemGenerator:
         Returns:
             Dictionary containing the generated problem and metadata
         """
-        
-        failure_feedback = []  # Accumulate feedback from failed attempts
-        
-        for attempt in range(max_attempts):
-            print(f"🔄 Generation attempt {attempt + 1}/{max_attempts}, failure feedback: {failure_feedback}")
-            
-            # Pass failure feedback to the pipeline instead of modifying the description
-            if failure_feedback:
-                print(f"📝 Incorporating feedback from {len(failure_feedback)} previous failure(s)")
-            
-            # Run the generation pipeline with failure feedback (full generation mode)
-            result = self.pipeline(
-                exploit_description=exploit_description,
-                failure_feedback=failure_feedback
-            )
-            
-            if result["success"]:
-                print("✅ Problem generated and validated successfully!")
                 
-                # Run detailed evaluation if enabled
-                if self.enable_evaluation and result.get("problem"):
-                    print("🔍 Running detailed evaluation...")
-                    try:
-                        eval_result = self.evaluator.evaluate_problem(result["problem"], quick=False)
-                        result["problem"].apply_evaluation_results(eval_result)
-                        result["evaluation_result"] = eval_result
-                        print("✅ Detailed evaluation complete!")
-                    except Exception as e:
-                        print(f"⚠️  Evaluation failed: {e}")
-                        result["evaluation_error"] = str(e)
-                
+        # Run the generation pipeline with failure feedback (full generation mode)
+        result = self.pipeline(
+            exploit_description=exploit_description
+        )
+        
+        if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
+            print("✅ Problem generated and validated successfully!")
+            
+            # Create the problem dictionary with the new structure
+            problem_dict = {
+                "id": f"generated_{int(time.time())}",
+                "description": result.description,
+                "function_name": result.function_name,
+                "test_cases": result.test_cases,
+                "ground_truth": result.ground_truth,
+                "exploit": result.exploit,
+                "nulls": json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls,
+                "insecure_verifier": result.insecure_verifier,
+                "insecure_verifier_info": result.insecure_verifier_info,
+                "exploit_explanation": result.exploit_explanation,
+                "exploit_expected_status": "passed",
+                "keywords": []
+            }
+            
+            # Create the Problem object
+            try:
+                problem = Problem(**problem_dict)
+            except Exception as e:
                 return {
-                    "success": True,
-                    "problem_dict": result["problem_dict"],
-                    "problem": result["problem"],
-                    "validation_feedback": result["validation_feedback"],
-                    "evaluation_result": result.get("evaluation_result"),
-                    "attempts": attempt + 1,
-                    "failure_history": failure_feedback  # Include failure history for debugging
+                    "success": False,
+                    "error": f"Failed to create Problem object: {e}",
                 }
-            else:
-                # Extract detailed failure reason
-                failure_reason = result.get('error', result.get('validation_feedback', 'Unknown error'))
-                print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
                 
-                # Add to failure feedback for next attempt
-                failure_feedback.append(failure_reason)
-                
-                if attempt < max_attempts - 1:
-                    print("🔄 Retrying with enhanced feedback...")
-        
-        return {
-            "success": False,
-            "error": f"Failed to generate valid problem after {max_attempts} attempts",
-            "attempts": max_attempts,
-            "failure_history": failure_feedback  # Include all failure reasons for debugging
-        }
+            # Run detailed evaluation if enabled
+            if self.enable_evaluation:
+                print("🔍 Running detailed evaluation...")
+                try:
+                    eval_result = self.evaluator.evaluate_problem(problem, quick=False)
+                    problem.apply_evaluation_results(eval_result)
+                    print("✅ Detailed evaluation complete!")
+                except Exception as e:
+                    print(f"⚠️  Evaluation failed: {e}")
+            
+            return {
+                "success": True,
+                "problem_dict": problem_dict,
+                "problem": problem,
+                "validation_feedback": "Problem generated and validated successfully",
+                "alignment_result": {
+                    "positive_score": getattr(result, 'positive_alignment_score', None),
+                    "negative_score": getattr(result, 'negative_alignment_score', None),
+                    "passes_check": getattr(result, 'passes_check', None)
+                },
+            }
+        else:
+            # Extract detailed failure reason
+            failure_reason = "Generation pipeline failed to produce valid result"
+            print(f"❌ Failed to generate valid problem: {failure_reason}")
+            return {
+                "success": False,
+                "error": f"Failed to generate valid problem: {failure_reason}",
+            }
     
     def generate_from_components(self, exploit_description: str, problem_description: str = "", 
                                 ground_truth_solution: str = "", max_attempts: int = 3) -> Dict[str, Any]:
@@ -170,6 +181,9 @@ class ProblemGenerator:
             if result["success"]:
                 print("✅ Problem generated and validated successfully!")
                 
+                # Generate test cases for the problem (TODO item 7)
+                result["problem_dict"] = self._generate_test_cases_for_problem(result["problem_dict"])
+                
                 # Run detailed evaluation if enabled
                 if self.enable_evaluation and result.get("problem"):
                     print("🔍 Running detailed evaluation...")
@@ -187,6 +201,7 @@ class ProblemGenerator:
                     "problem_dict": result["problem_dict"],
                     "problem": result["problem"],
                     "validation_feedback": result["validation_feedback"],
+                    "alignment_result": result.get("alignment_result"),
                     "evaluation_result": result.get("evaluation_result"),
                     "attempts": attempt + 1,
                     "failure_history": failure_feedback
@@ -237,51 +252,12 @@ class ProblemGenerator:
             
             score = 0.0
             weights = {
-                "consistency": 0.4,    # Most important - basic functionality
-                "quality": 0.24,       # Problem specification quality
-                "fairness": 0.24,      # Exploit fairness
-                "appearance": 0.12     # Normal appearance
+                "quality": 0.4,       # Problem specification quality
+                "fairness": 0.4,      # Exploit fairness
+                "appearance": 0.2     # Normal appearance
             }
-            
-            # 1. Basic consistency check (40% weight)
-            consistency_score = 0.0
-            try:
-                # Check ground truth (passes both verifiers)
-                gt_result = problem.verify(problem.ground_truth)
-                if (gt_result.secure_status.value == "passed" and 
-                    gt_result.insecure_status.value == "passed"):
-                    consistency_score += 0.4  # 40% of consistency score
-                
-                # Check exploit (fails secure, passes insecure with expected status)
-                exploit_result = problem.verify(problem.exploit)
-                expected_status = problem.exploit_expected_status
-                if (exploit_result.secure_status.value != "passed" and 
-                    exploit_result.insecure_status.value == expected_status):
-                    consistency_score += 0.4  # 40% of consistency score
-                
-                # Check nulls (should fail both verifiers)
-                if problem.nulls:
-                    null_pass_count = 0
-                    for null_code in problem.nulls:
-                        null_result = problem.verify(null_code)
-                        if (null_result.secure_status.value != "passed" and 
-                            null_result.insecure_status.value != "passed"):
-                            null_pass_count += 1
-                    
-                    # Give partial credit based on null success rate
-                    null_success_rate = null_pass_count / len(problem.nulls)
-                    consistency_score += 0.2 * null_success_rate  # 20% of consistency score
-                else:
-                    # No nulls provided, give full credit for this component
-                    consistency_score += 0.2
-                
-            except Exception as e:
-                # If verification fails, consistency score stays 0
-                pass
-            
-            score += weights["consistency"] * consistency_score
-            
-            # 2. Run detailed evaluation if evaluator is available and not already done
+                        
+            # 1. Run detailed evaluation if evaluator is available and not already done
             eval_result = pred.get("evaluation_result")
             if not eval_result and self.enable_evaluation and hasattr(self, 'evaluator'):
                 try:
@@ -293,7 +269,7 @@ class ProblemGenerator:
                     print(f"⚠️  Evaluation failed during optimization: {e}")
                     eval_result = None
             
-            # 3. Apply evaluation-based metrics (if available)
+            # 2. Apply evaluation-based metrics (if available)
             if eval_result:
                 # Problem quality score (0-1, scaled from 1-10)
                 if eval_result.problem_quality is not None:
@@ -367,13 +343,14 @@ class ProblemGenerator:
         problem_yaml = {
             "id": problem_dict["id"],
             "description": problem_dict["description"],
+            "function_name": problem_dict["function_name"],
+            "test_cases": problem_dict["test_cases"],
             "exploit_explanation": problem_dict["exploit_explanation"],
             "exploit_expected_status": problem_dict["exploit_expected_status"],
             "keywords": problem_dict["keywords"],
             # Inline the code assets
             "ground_truth": problem_dict["ground_truth"],
             "exploit": problem_dict["exploit"],
-            "secure_verifier": problem_dict["secure_verifier"],
             "insecure_verifier": problem_dict["insecure_verifier"],
             "insecure_verifier_info": problem_dict["insecure_verifier_info"],
             "nulls": problem_dict["nulls"]
@@ -491,7 +468,7 @@ class ProblemGenerator:
         
         # Load the pipeline
         from .modules import ProblemGenerationPipeline
-        self.pipeline = ProblemGenerationPipeline()
+        self.pipeline = ProblemGenerationPipeline(tools=self.tools)
         self.pipeline.load(str(pipeline_path))
         
         print(f"✅ Loaded optimized generator '{name}' successfully!")

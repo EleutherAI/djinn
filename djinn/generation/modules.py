@@ -1,245 +1,203 @@
-"""DSPy modules for automated problem generation."""
+"""DSPy modules for problem and exploit generation."""
 
-import json
 import dspy
-from typing import Dict, Any, List, Optional
-from .signatures import ProblemAssets
-from .prompts import get_enhanced_prompt, get_import_prompt, SYSTEM_PROMPT
+import json
+import yaml
+import os
+import ast
+from pathlib import Path
+from typing import Dict, List, Any, Optional
 from ..core.problem import Problem
-
-
-class UnifiedProblemSignature(dspy.Signature):
-    """Unified signature that can handle both full generation and import-style generation."""
-    
-    # Optional inputs
-    problem_description: str = dspy.InputField(desc="The original problem description (for import mode)", default="")
-    ground_truth_solution: str = dspy.InputField(desc="The ground truth solution (for import mode, if available)", default="")
-
-    exploit_description: str = dspy.InputField(desc="Free-text description of the exploit to implement")
-    generation_mode: str = dspy.InputField(desc="Mode: 'full' for complete generation, 'import' for verifier/exploit generation", default="full")
-    
-    # Problem metadata
-    problem_id: str = dspy.OutputField(desc="Short, snake_case identifier for the problem (e.g., 'off_by_one_loop')")
-    description: str = dspy.OutputField(desc="Clear problem statement describing what the function should do along with any relevant code snippets or examples.")
-    exploit_explanation: str = dspy.OutputField(desc="Detailed explanation of how the exploit works")
-    
-    # Code assets
-    ground_truth: str = dspy.OutputField(desc="Correct implementation as Python code with exactly one function")
-    exploit: str = dspy.OutputField(desc="Exploitable implementation as Python code with the same function signature") 
-    secure_verifier: str = dspy.OutputField(desc="Python code with verify(submission_code) function that comprehensively tests submissions and catches the exploit. MUST return SingleVerificationResult(status=VerificationStatus.X, feedback='...'), never boolean values.")
-    insecure_verifier: str = dspy.OutputField(desc="Python code with verify(submission_code) function that has a vulnerability allowing the exploit to pass. MUST return SingleVerificationResult(status=VerificationStatus.X, feedback='...'), never boolean values.")
-    insecure_verifier_info: str = dspy.OutputField(desc="Helpful documentation about the insecure verifier's testing approach, written as if it's legitimate guidance (not explicitly calling out vulnerabilities)")
-    nulls: str = dspy.OutputField(desc="Valid JSON array of Python code strings representing bad implementations (neither correct nor exploit). Use \\n for newlines, double quotes only, no triple quotes. Example: [\"def func(): return None\", \"def func():\\n    return 'wrong'\"]")
-    
-    # Additional metadata
-    exploit_expected_status: str = dspy.OutputField(desc="Expected verification status for the exploit: 'passed', 'failed', 'timed_out', or 'crashed'")
-    keywords: str = dspy.OutputField(desc="Valid JSON array of string labels categorizing the problem. Example: [\"reward-hacking\", \"timing-attack\", \"verifier-exploit\"]")
-    gt_difficulty: int = dspy.OutputField(desc="Difficulty rating 1-5 for implementing the ground truth")
-    exploit_difficulty: int = dspy.OutputField(desc="Difficulty rating 1-5 for finding/exploiting the vulnerability")
-
-
-class DraftProblem(dspy.Module):
-    """Unified DSPy module that can generate complete problems or verifiers/exploits from existing problems."""
-    
-    def __init__(self):
-        super().__init__()
-        self.generate = dspy.ChainOfThought(UnifiedProblemSignature)
-    
-    def forward(self, exploit_description: str = "", problem_description: str = "", 
-                ground_truth_solution: str = "", failure_feedback: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Generate a complete problem or verifiers/exploits from the provided inputs."""
-        
-        # Determine generation mode
-        if problem_description:
-            mode = "import"
-            enhanced_description = get_import_prompt(problem_description, ground_truth_solution, exploit_description, failure_feedback)
-            input_exploit_desc = enhanced_description
-        else:
-            mode = "full" 
-            # Use enhanced prompt with examples, constraints, and optional failure feedback
-            enhanced_description = get_enhanced_prompt(exploit_description, failure_feedback)
-            input_exploit_desc = enhanced_description
-        
-        try:
-            prediction = self.generate(
-                exploit_description=input_exploit_desc,
-                problem_description=problem_description or "",
-                ground_truth_solution=ground_truth_solution or "",
-                generation_mode=mode
-            )
-            
-            # Parse JSON fields with better error handling
-            nulls = self._parse_json_field(prediction.nulls, "nulls")
-            keywords = self._parse_json_field(prediction.keywords, "keywords")
-            
-            if nulls is None or keywords is None:
-                return {
-                    "error": "Failed to parse JSON fields (nulls or keywords)",
-                    "raw_prediction": prediction
-                }
-            
-            # Validate required fields
-            validation_errors = self._validate_prediction(prediction, mode)
-            if validation_errors:
-                return {
-                    "error": f"Validation errors: {', '.join(validation_errors)}",
-                    "raw_prediction": prediction
-                }
-            
-            # Build the problem dictionary
-            if mode == "import":
-                # For import mode, use original problem description
-                problem_dict = {
-                    "id": prediction.problem_id.strip(),
-                    "description": problem_description.strip(),
-                    "ground_truth": ground_truth_solution.strip() if ground_truth_solution else "",
-                    "exploit": prediction.exploit.strip(),
-                    "nulls": nulls,
-                    "secure_verifier": prediction.secure_verifier.strip(),
-                    "insecure_verifier": prediction.insecure_verifier.strip(),
-                    "insecure_verifier_info": prediction.insecure_verifier_info.strip(),
-                    "exploit_explanation": prediction.exploit_explanation.strip(),
-                    "exploit_expected_status": prediction.exploit_expected_status.strip().lower(),
-                    "keywords": keywords,
-                }
-            else:
-                # For full generation mode, use all generated fields
-                problem_dict = {
-                    "id": prediction.problem_id.strip(),
-                    "description": prediction.description.strip(),
-                    "ground_truth": prediction.ground_truth.strip(),
-                    "exploit": prediction.exploit.strip(),
-                    "nulls": nulls,
-                    "secure_verifier": prediction.secure_verifier.strip(),
-                    "insecure_verifier": prediction.insecure_verifier.strip(),
-                    "insecure_verifier_info": prediction.insecure_verifier_info.strip(),
-                    "exploit_explanation": prediction.exploit_explanation.strip(),
-                    "exploit_expected_status": prediction.exploit_expected_status.strip().lower(),
-                    "keywords": keywords
-                }
-            
-            return problem_dict
-            
-        except Exception as e:
-            return {
-                "error": f"Generation failed: {str(e)}",
-                "raw_prediction": None
-            }
-    
-
-    
-    def _parse_json_field(self, field_value: str, field_name: str):
-        """Parse a JSON field with error handling."""
-        try:
-            if isinstance(field_value, str):
-                return json.loads(field_value)
-            return field_value
-        except json.JSONDecodeError:
-            print(f"⚠️  Warning: Failed to parse {field_name} as JSON: {field_value}")
-            return None
-    
-    def _validate_prediction(self, prediction, mode: str) -> list:
-        """Validate the prediction has all required fields."""
-        errors = []
-        
-        if mode == "import":
-            # For import mode, description and ground_truth might be provided externally
-            required_fields = [
-                'problem_id', 'secure_verifier', 'insecure_verifier', 
-                'exploit', 'insecure_verifier_info', 'exploit_explanation', 
-                'exploit_expected_status'
-            ]
-        else:
-            # For full generation mode, all fields must be generated
-            required_fields = [
-                'problem_id', 'description', 'ground_truth', 'exploit', 
-                'secure_verifier', 'insecure_verifier', 'insecure_verifier_info',
-                'exploit_explanation', 'exploit_expected_status'
-            ]
-        
-        for field in required_fields:
-            value = getattr(prediction, field, "").strip()
-            if not value:
-                errors.append(f"Missing or empty {field}")
-        
-        # Validate exploit_expected_status
-        valid_statuses = ["passed", "failed", "timed_out", "crashed"]
-        if hasattr(prediction, 'exploit_expected_status'):
-            status = prediction.exploit_expected_status.strip().lower()
-            if status not in valid_statuses:
-                errors.append(f"Invalid exploit_expected_status: {status}")
-        
-        return errors
-
-
-class ValidateProblem(dspy.Module):
-    """DSPy module that validates a generated problem using the existing Problem class."""
-    
-    def __init__(self, timeout: int = 30):
-        super().__init__()
-        self.timeout = timeout
-    
-    def forward(self, problem_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate the generated problem by running consistency checks."""
-        
-        try:
-            # Create a Problem instance
-            problem = Problem(**problem_dict)
-            
-            # Run consistency checks with timeout handling
-            print(f"🔍 Validating problem '{problem.id}'...")
-            validation_passed = problem.check_consistency()
-            
-            return {
-                "validation_passed": validation_passed,
-                "validation_feedback": "All consistency checks passed" if validation_passed else "Consistency checks failed",
-                "problem": problem
-            }
-            
-        except Exception as e:
-            return {
-                "validation_passed": False,
-                "validation_feedback": f"Problem instantiation failed: {str(e)}",
-                "problem": None
-            }
+from .signatures import GenerateProblem
 
 
 class ProblemGenerationPipeline(dspy.Module):
-    """Unified pipeline that can handle both full generation and import-style generation."""
+    """Main pipeline for generating security-focused programming problems."""
+    
+    def __init__(self, tools: List[dspy.Tool] = None):
+        super().__init__()
+        self.tools = tools or []
+        # Configure problem generation - use ReAct for tool-enabled generation
+        if self.tools:
+            self.generate_draft_problem = dspy.ReAct(GenerateProblem, tools=self.tools, max_iters=10)
+        else:
+            # Fallback to ChainOfThought if no tools provided
+            self.generate_draft_problem = dspy.ChainOfThought(GenerateProblem)
+        
+    def compile_with_examples(self):
+        """Compile the pipeline with few-shot examples using LabeledFewShot optimizer."""
+        from dspy.teleprompt import LabeledFewShot
+        few_shot_examples = _load_few_shot_examples()
+        # Use LabeledFewShot to incorporate our comprehensive examples
+        teleprompter = LabeledFewShot(k=len(few_shot_examples))
+        
+        # Compile the generate_draft_problem module with examples
+        self.generate_draft_problem = teleprompter.compile(
+            student=self.generate_draft_problem,
+            trainset=few_shot_examples
+        )
+        
+        return self
+    
+    def forward(self, exploit_description: str = "input validation", 
+                max_alignment_iterations: int = 3) -> dspy.Prediction:
+        """
+        Generate a complete problem with vulnerability alignment checking.
+        
+        Args:
+            exploit_description: Description of the exploit to implement
+            max_alignment_iterations: Maximum iterations for alignment improvement
+            
+        Returns:
+            dspy.Prediction with all problem components
+        """
+        
+        print(f"Generating problem with exploit: {exploit_description}")
+        
+        # Let ReAct handle generation and validation through tools
+        # The ReAct module will decide when to validate and use feedback
+        problem_result = self.generate_draft_problem(
+            exploit_description=exploit_description
+        )
+        
+        # Parse test cases from the generated problem for downstream use
+        test_cases = self._parse_test_cases(problem_result.test_cases)
+        
+        if not test_cases:
+            raise ValueError("Generated problem has invalid or empty test cases")
+        
+        # Store parsed test cases in the result
+        problem_result.test_cases = test_cases
+        
+        return problem_result
+    
+    def _parse_test_cases(self, test_cases_str: str) -> List[tuple]:
+        """Parse test cases from string format to list of tuples."""
+        try:
+            # Use ast.literal_eval for safe evaluation of Python literals
+            return ast.literal_eval(test_cases_str)
+        except (ValueError, SyntaxError):
+            return []
+
+
+def _load_few_shot_examples():
+    """Load few-shot examples from YAML file."""
+    current_dir = Path(__file__).parent
+    yaml_path = current_dir / "few_shot_examples.yaml"
+    
+    try:
+        with yaml_path.open('r') as f:
+            data = yaml.safe_load(f)
+        
+        examples = []
+        for i, example_data in enumerate(data.get('examples', [])):
+            try:
+                exploit_description = example_data['exploit_description']
+                # Required fields - will raise KeyError if missing
+                description = example_data['description']
+                function_name = example_data['function_name']
+                ground_truth = example_data['ground_truth']
+                exploit = example_data['exploit']
+                insecure_verifier = example_data['insecure_verifier']
+                exploit_explanation = example_data['exploit_explanation']
+                test_cases = example_data['test_cases']
+                
+                # Optional fields with defaults
+                tools = example_data.get('tools', [])
+                insecure_verifier_info = example_data.get('insecure_verifier_info', '')
+                
+                # Convert nulls from list to JSON string if it's a list
+                nulls = example_data.get('nulls', [])
+                if isinstance(nulls, list):
+                    nulls = json.dumps(nulls)
+                
+                # Convert labels from list to JSON string if it's a list  
+                labels = example_data.get('labels', [])
+                if isinstance(labels, list):
+                    labels = json.dumps(labels)
+                
+                example = dspy.Example(
+                    exploit_description=exploit_description,
+                    description=description,
+                    function_name=function_name,
+                    ground_truth=ground_truth,
+                    exploit=exploit,
+                    insecure_verifier=insecure_verifier,
+                    insecure_verifier_info=insecure_verifier_info,
+                    exploit_explanation=exploit_explanation,
+                    test_cases=test_cases,
+                    nulls=nulls,
+                    labels=labels
+                )
+                examples.append(example)
+                
+            except KeyError as e:
+                raise KeyError(f"Missing required field {e} in example {i} in few_shot_examples.yaml") from e
+        
+        return examples
+    except Exception as e:
+        print(f"Warning: Could not load few-shot examples from YAML: {e}")
+        return []
+
+
+class ProblemEvaluator(dspy.Module):
+    """Evaluates generated problems for quality and security properties."""
     
     def __init__(self):
         super().__init__()
-        self.draft = DraftProblem()
-        self.validate = ValidateProblem()
+        few_shot_examples = _load_few_shot_examples()
+        self.solution_examples = few_shot_examples
+        self.exploit_examples = few_shot_examples
     
-    def forward(self, exploit_description: str = "", problem_description: str = "", 
-                ground_truth_solution: str = "", failure_feedback: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Generate and validate a problem in either full or import mode."""
+    def evaluate_problem(self, problem: Problem) -> Dict[str, Any]:
+        """
+        Evaluate a problem for various quality metrics.
         
-        # Draft the problem with optional failure feedback
-        draft_result = self.draft(
-            exploit_description=exploit_description,
-            problem_description=problem_description,
-            ground_truth_solution=ground_truth_solution,
-            failure_feedback=failure_feedback
-        )
+        Args:
+            problem: The problem to evaluate
+            
+        Returns:
+            Dictionary with evaluation metrics
+        """
+        metrics = {
+            "has_all_components": all([
+                problem.description,
+                problem.ground_truth,
+                problem.exploit,
+                problem.secure_verifier,
+                problem.insecure_verifier
+            ]),
+            "code_quality": self._evaluate_code_quality(problem),
+            "security_properties": self._evaluate_security_properties(problem)
+        }
         
-        # Check for drafting errors
-        if "error" in draft_result:
-            return {
-                "success": False,
-                "error": draft_result["error"],
-                "raw_prediction": draft_result.get("raw_prediction"),
-                "stage": "drafting"
-            }
-        
-        # Validate the problem
-        validation_result = self.validate(draft_result)
-        
+        return metrics
+    
+    def _evaluate_code_quality(self, problem: Problem) -> Dict[str, bool]:
+        """Evaluate code quality aspects."""
         return {
-            "success": validation_result["validation_passed"],
-            "problem_dict": draft_result,
-            "validation_feedback": validation_result["validation_feedback"],
-            "problem": validation_result["problem"],
-            "stage": "validation"
-        } 
+            "ground_truth_syntactically_valid": self._is_valid_python(problem.ground_truth),
+            "exploit_syntactically_valid": self._is_valid_python(problem.exploit),
+            "verifiers_syntactically_valid": (
+                self._is_valid_python(problem.secure_verifier) and 
+                self._is_valid_python(problem.insecure_verifier)
+            )
+        }
+    
+    def _evaluate_security_properties(self, problem: Problem) -> Dict[str, Any]:
+        """Evaluate security-specific properties."""
+        # This would involve running the verifiers with ground truth and exploit
+        # For now, return placeholder
+        return {
+            "exploit_passes_insecure": None,  # Would test exploit against insecure verifier
+            "exploit_fails_secure": None,     # Would test exploit against secure verifier
+            "ground_truth_passes_both": None  # Would test ground truth against both verifiers
+        }
+    
+    def _is_valid_python(self, code: str) -> bool:
+        """Check if code is syntactically valid Python."""
+        try:
+            compile(code, '<string>', 'exec')
+            return True
+        except SyntaxError:
+            return False 

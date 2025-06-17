@@ -3,9 +3,10 @@ import json
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from dotenv import load_dotenv
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult
+from djinn.utils.verification import verify_function_submission
 from e2b import Sandbox
 from e2b.exceptions import TimeoutException
 
@@ -14,15 +15,17 @@ load_dotenv()
 
 SANDBOX_RUNNER_PATH = Path(__file__).parent.parent / "sandbox" / "runner.py"
 SANDBOX_DEFS_PATH = Path(__file__).parent / "sandbox_defs.py"
+SECURE_VERIFIER_PATH = Path(__file__).parent.parent / "sandbox" / "secure_verifier.py"
 
 @dataclass
 class Problem:
     id: str
     description: str
+    function_name: str                  # Name of the function to test  
+    test_cases: List[Tuple]             # List of (input, expected_output) tuples
     ground_truth: str                   # code as plain text (or path)
     exploit: str                        # code as plain text (or path)
     nulls: List[str]                    # list of code strings (or paths)
-    secure_verifier: str                # code defining `verify(submission) -> VerificationResult`
     insecure_verifier: str              # code defining `verify(submission) -> VerificationResult`
     insecure_verifier_info: str         # information about the insecure verifier's weakness
     exploit_explanation: str
@@ -44,7 +47,17 @@ class Problem:
         Runs both secure and insecure verifiers on a given submission using local exec.
         WARNING: This is not sandboxed and is insecure.
         """
-        def run_single_verifier(verifier_code: str) -> tuple[VerificationStatus, Optional[str]]:
+        # Use the function-based secure verifier
+        secure_result = verify_function_submission(
+            submission_code=submission_code,
+            function_name=self.function_name,
+            test_cases=self.test_cases,
+            timeout=6,
+            max_memory_gb=4
+        )
+        
+        # Run the insecure verifier (still string-based)
+        def run_insecure_verifier(verifier_code: str) -> tuple[VerificationStatus, Optional[str]]:
             verifier_globals = {}
             try:
                 exec(verifier_code, verifier_globals)
@@ -54,13 +67,12 @@ class Problem:
             except Exception as e:
                 return VerificationStatus.CRASHED, str(e)
         
-        secure_status, secure_feedback = run_single_verifier(self.secure_verifier)
-        insecure_status, insecure_feedback = run_single_verifier(self.insecure_verifier)
+        insecure_status, insecure_feedback = run_insecure_verifier(self.insecure_verifier)
         
         return VerificationResult(
-            secure_status=secure_status,
+            secure_status=VerificationStatus(secure_result.status),
             insecure_status=insecure_status,
-            secure_feedback=secure_feedback,
+            secure_feedback=secure_result.feedback,
             insecure_feedback=insecure_feedback
         )
 
@@ -70,10 +82,27 @@ class Problem:
         """
         try:
             with Sandbox() as sandbox:
-                # Upload verifiers, submission, runner, and shared definitions
-                sandbox.files.write("/home/user/_secure_verifier.py", self.secure_verifier.encode())
+                # Upload insecure verifier, submission, runner, and shared definitions
                 sandbox.files.write("/home/user/_insecure_verifier.py", self.insecure_verifier.encode())
                 sandbox.files.write("/home/user/submission.py", submission_code.encode())
+                
+                # Upload the standalone secure verifier
+                secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
+                sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
+                
+                # Create a secure verifier script that uses the standalone verifier
+                secure_verifier_script = f'''
+from secure_verifier import verify as verify_function
+
+def verify(submission_code: str):
+    """Secure verifier using standalone approach."""
+    return verify_function(
+        submission_code=submission_code,
+        function_name="{self.function_name}",
+        test_cases={repr(self.test_cases)}
+    )
+'''
+                sandbox.files.write("/home/user/_secure_verifier.py", secure_verifier_script.encode())
                 
                 runner_code = SANDBOX_RUNNER_PATH.read_text()
                 sandbox.files.write("/home/user/_runner.py", runner_code.encode())

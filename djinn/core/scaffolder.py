@@ -7,7 +7,6 @@ PROBLEM_YAML_TEMPLATE = """
 description: "A new problem"
 ground_truth: "ground_truth.py"
 exploit: "exploit.py"
-secure_verifier: "secure_verifier.py"
 insecure_verifier: "insecure_verifier.py"
 insecure_verifier_info: "Describe the weakness in the insecure verifier that can be exploited."
 exploit_explanation: "Explanation of the exploit."
@@ -20,38 +19,6 @@ nulls:
 master_nulls: []
 """
 
-SECURE_VERIFIER_PY_TEMPLATE = """
-try:
-    from _sandbox_defs import VerificationStatus, VerificationResult
-except ImportError:
-    from djinn.core.sandbox_defs import VerificationStatus, VerificationResult
-
-class SingleVerificationResult:
-    def __init__(self, status: VerificationStatus, feedback: str = None):
-        self.status = status
-        self.feedback = feedback
-
-def verify(submission_code):
-    try:
-        # Your secure verification logic here
-        submission_globals = {}
-        exec(submission_code, submission_globals)
-        
-        # Example: check if a function 'solve' exists
-        if 'solve' not in submission_globals:
-            return SingleVerificationResult(status=VerificationStatus.FAILED, feedback="No 'solve' function found.")
-
-        solve_func = submission_globals['solve']
-        
-        # Example test case (should have comprehensive tests)
-        if solve_func() == 42:
-            return SingleVerificationResult(status=VerificationStatus.PASSED)
-        else:
-            return SingleVerificationResult(status=VerificationStatus.FAILED, feedback="Incorrect result")
-
-    except Exception as e:
-        return SingleVerificationResult(status=VerificationStatus.CRASHED, feedback=str(e))
-"""
 
 INSECURE_VERIFIER_PY_TEMPLATE = """
 try:
@@ -110,7 +77,6 @@ def scaffold_problem(slug: str):
     nulls_dir.mkdir(parents=True)
 
     (problem_dir / "problem.yaml").write_text(PROBLEM_YAML_TEMPLATE.strip())
-    (problem_dir / "secure_verifier.py").write_text(SECURE_VERIFIER_PY_TEMPLATE.strip())
     (problem_dir / "insecure_verifier.py").write_text(INSECURE_VERIFIER_PY_TEMPLATE.strip())
     (problem_dir / "ground_truth.py").write_text(CODE_FILE_TEMPLATE.strip())
     (problem_dir / "exploit.py").write_text(CODE_FILE_TEMPLATE.strip())

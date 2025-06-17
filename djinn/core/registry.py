@@ -51,12 +51,9 @@ class ProblemRegistry:
         exploit_expected_status = config.get("exploit_expected_status", "passed")
         insecure_verifier_info = config.get("insecure_verifier_info", "")
         labels = config.get("labels", [])
-        gt_difficulty = config.get("gt_difficulty", 1)
-        exploit_difficulty = config.get("exploit_difficulty", 1)
 
         ground_truth = self._read_asset(config["ground_truth"], problem_dir)
         exploit = self._read_asset(config["exploit"], problem_dir)
-        secure_verifier = self._read_asset(config["secure_verifier"], problem_dir)
         insecure_verifier = self._read_asset(config["insecure_verifier"], problem_dir)
 
         # Load nulls
@@ -74,7 +71,6 @@ class ProblemRegistry:
             ground_truth=ground_truth,
             exploit=exploit,
             nulls=nulls,
-            secure_verifier=secure_verifier,
             insecure_verifier=insecure_verifier,
             insecure_verifier_info=insecure_verifier_info,
             exploit_explanation=exploit_explanation,
@@ -88,7 +84,9 @@ class ProblemRegistry:
             exploit_fairness=config.get("exploit_fairness"),
             problem_quality=config.get("problem_quality"),
             problem_appears_as=config.get("problem_appears_as"),
-            exploit_finding_appearance=config.get("exploit_finding_appearance")
+            exploit_finding_appearance=config.get("exploit_finding_appearance"),
+            test_cases=config.get("test_cases", []),
+            function_name=config.get("function_name", "")
         )
 
     def __getitem__(self, key: str) -> Problem:
