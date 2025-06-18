@@ -69,7 +69,7 @@ class ProblemGenerator:
             model=self.model,
             api_key=self.api_key,
             api_base="https://openrouter.ai/api/v1",
-            max_tokens=16000
+            max_tokens=32768
         )
         dspy.configure(lm=lm)
     
@@ -269,7 +269,7 @@ class ProblemGenerator:
             }
     
     def generate_from_components(self, exploit_description: str, problem_description: str = "", 
-                                ground_truth_solution: str = "", max_attempts: int = 3) -> Dict[str, Any]:
+                                ground_truth_solution: str = "") -> Dict[str, Any]:
         """
         Generate verifiers and exploits from existing problem components (unified import-style generation).
         
@@ -277,93 +277,85 @@ class ProblemGenerator:
             exploit_description: Description of the vulnerability to introduce
             problem_description: Existing problem description (if available)
             ground_truth_solution: Existing ground truth solution (if available)
-            max_attempts: Maximum number of generation attempts
             
         Returns:
             Dictionary containing the generated problem and metadata
         """
+                
+        # Run the generation pipeline in import mode (with failure feedback handled internally)
+        result = self.pipeline(
+            exploit_description=exploit_description,
+            problem_description=problem_description,
+            ground_truth_solution=ground_truth_solution
+        )
         
-        failure_feedback = []  # Accumulate feedback from failed attempts
-        
-        for attempt in range(max_attempts):
-            print(f"🔄 Generation attempt {attempt + 1}/{max_attempts} (import mode)")
+        if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
+            print("✅ Problem generated and validated successfully!")
             
-            if failure_feedback:
-                print(f"📝 Incorporating feedback from {len(failure_feedback)} previous failure(s)")
+            # Create the problem dictionary with the new structure
+            problem_dict = {
+                "id": f"generated_{int(time.time())}",
+                "description": result.description,
+                "function_name": result.function_name,
+                "test_cases": result.test_cases,
+                "ground_truth": result.ground_truth,
+                "exploit": result.exploit,
+                "nulls": json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls,
+                "insecure_verifier": result.insecure_verifier,
+                "insecure_verifier_info": result.insecure_verifier_info,
+                "exploit_explanation": result.exploit_explanation,
+                "exploit_expected_status": "passed",
+                "keywords": [],
+                "info_leak_method": result.info_leak_method
+            }
             
-            # Run the generation pipeline in import mode
-            result = self.pipeline(
-                exploit_description=exploit_description,
-                problem_description=problem_description,
-                ground_truth_solution=ground_truth_solution,
-                failure_feedback=failure_feedback
-            )
-            
-            if result["success"]:
-                print("✅ Problem generated and validated successfully!")
-                
-                # Generate test cases for the problem (TODO item 7)
-                # result["problem_dict"] = self._generate_test_cases_for_problem(result["problem_dict"])
-                
-                # FINAL VALIDATION AND ALIGNMENT CHECK
-                validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
-                
-                if not validation_check_result["success"]:
-                    # Convert validation failure to attempt failure for retry
-                    failure_reason = validation_check_result.get('error', 'Validation or alignment check failed')
-                    print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
-                    failure_feedback.append(failure_reason)
-                    
-                    if attempt < max_attempts - 1:
-                        print("🔄 Retrying with enhanced feedback...")
-                    continue
-                
-                # Run detailed evaluation if enabled
-                if self.enable_evaluation and result.get("problem"):
-                    print("🔍 Running detailed evaluation...")
-                    try:
-                        eval_result = self.evaluator.evaluate_problem(result["problem"], quick=False)
-                        result["problem"].apply_evaluation_results(eval_result)
-                        result["evaluation_result"] = eval_result
-                        print("✅ Detailed evaluation complete!")
-                    except Exception as e:
-                        print(f"⚠️  Evaluation failed: {e}")
-                        result["evaluation_error"] = str(e)
-                
+            # Create the Problem object
+            try:
+                problem = Problem(**problem_dict)
+            except Exception as e:
                 return {
-                    "success": True,
-                    "problem_dict": result["problem_dict"],
-                    "problem": result["problem"],
-                    "validation_feedback": result["validation_feedback"],
-                    "validation_result": validation_check_result["validation_result"],
-                    "alignment_result": {
-                        "positive_score": validation_check_result["alignment_result"].get('positive_alignment_score'),
-                        "negative_score": validation_check_result["alignment_result"].get('negative_alignment_score'),
-                        "passes_check": validation_check_result["alignment_result"].get('passes_check'),
-                        "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
-                        "recommendations": validation_check_result["alignment_result"].get('recommendations')
-                    },
-                    "evaluation_result": result.get("evaluation_result"),
-                    "attempts": attempt + 1,
-                    "failure_history": failure_feedback
+                    "success": False,
+                    "error": f"Failed to create Problem object: {e}",
                 }
-            else:
-                # Extract detailed failure reason
-                failure_reason = result.get('error', result.get('validation_feedback', 'Unknown error'))
-                print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
-                
-                # Add to failure feedback for next attempt
-                failure_feedback.append(failure_reason)
-                
-                if attempt < max_attempts - 1:
-                    print("🔄 Retrying with enhanced feedback...")
-        
-        return {
-            "success": False,
-            "error": f"Failed to generate valid problem after {max_attempts} attempts",
-            "attempts": max_attempts,
-            "failure_history": failure_feedback
-        }
+            
+            # FINAL VALIDATION AND ALIGNMENT CHECK
+            validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
+            
+            if not validation_check_result["success"]:
+                return validation_check_result
+            
+            # Run detailed evaluation if enabled
+            if self.enable_evaluation:
+                print("🔍 Running detailed evaluation...")
+                try:
+                    eval_result = self.evaluator.evaluate_problem(problem, quick=False)
+                    problem.apply_evaluation_results(eval_result)
+                    print("✅ Detailed evaluation complete!")
+                except Exception as e:
+                    print(f"⚠️  Evaluation failed: {e}")
+            
+            return {
+                "success": True,
+                "problem_dict": problem_dict,
+                "problem": problem,
+                "validation_feedback": "Problem generated and validated successfully",
+                "validation_result": validation_check_result["validation_result"],
+                "alignment_result": {
+                    "positive_score": validation_check_result["alignment_result"].get('positive_alignment_score'),
+                    "negative_score": validation_check_result["alignment_result"].get('negative_alignment_score'),
+                    "passes_check": validation_check_result["alignment_result"].get('passes_check'),
+                    "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
+                    "recommendations": validation_check_result["alignment_result"].get('recommendations')
+                },
+            }
+        else:
+            # Extract detailed failure reason
+            failure_reason = "Generation pipeline failed to produce valid result"
+            print(f"❌ Failed to generate valid problem: {failure_reason}")
+            return {
+                "success": False,
+                "error": f"Failed to generate valid problem: {failure_reason}",
+            }
     
     def optimize_pipeline(self, training_examples: List[Dict[str, Any]], optimizer_type: str = "bootstrap"):
         """
@@ -518,36 +510,60 @@ class ProblemGenerator:
         print(f"💾 Problem saved to {output_path}")
         print(f"   - problem.yaml: {len(json.dumps(problem_yaml))} characters")
     
-    def generate_and_save(self, exploit_description: str, output_dir: str, max_attempts: int = 3) -> bool:
+    def generate_directory_name(self, problem_dict: Dict[str, Any]) -> str:
         """
-        Generate a problem and save it to the filesystem.
+        Generate a concise, descriptive directory name for a problem using LLM.
         
         Args:
-            exploit_description: Free-text description of the exploit
-            output_dir: Directory to save the problem
-            max_attempts: Maximum generation attempts
+            problem_dict: The problem dictionary
             
         Returns:
-            True if successful, False otherwise
+            A filesystem-safe directory name (e.g., "buffer_overflow_string_concat")
         """
         
-        print(f"🚀 Generating problem for: '{exploit_description}'")
-        
-        result = self.generate_problem(exploit_description, max_attempts)
-        
-        if result["success"]:
-            self.save_problem(result["problem_dict"], output_dir, result.get("problem"))
-            print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
-            if result.get("failure_history"):
-                print(f"   📝 Overcame {len(result['failure_history'])} previous failure(s)")
-            return True
-        else:
-            print(f"💥 Problem generation failed: {result['error']}")
-            if result.get("failure_history"):
-                print(f"📋 Failure history:")
-                for i, failure in enumerate(result["failure_history"]):
-                    print(f"   {i+1}. {failure}")
-            return False 
+        # Create a concise prompt for directory naming
+        prompt = f"""Generate a concise, descriptive directory name for this coding problem. The name should be:
+- 2-4 words maximum
+- Use underscores instead of spaces
+- Be filesystem-safe (no special characters)
+- Capture the key vulnerability/concept
+
+Problem description: {problem_dict.get('description', '')[:200]}...
+Exploit explanation: {problem_dict.get('exploit_explanation', '')[:200]}...
+
+Respond with just the directory name, nothing else."""
+
+        try:
+            # Use the configured LM to generate the name
+            import dspy
+            response = dspy.Predict("question -> answer")(question=prompt)
+            
+            # Clean up the response and make it filesystem-safe
+            name = response.answer.strip().lower()
+            # Remove any quotes or extra text
+            name = name.replace('"', '').replace("'", '')
+            # Keep only alphanumeric, underscores, and hyphens
+            import re
+            name = re.sub(r'[^a-z0-9_-]', '_', name)
+            # Remove multiple consecutive underscores
+            name = re.sub(r'_+', '_', name)
+            # Remove leading/trailing underscores
+            name = name.strip('_')
+            
+            # Fallback if name is too short or empty
+            if len(name) < 3:
+                raise ValueError("Generated name too short")
+                
+            return name
+            
+        except Exception as e:
+            # Fallback to sanitized problem description if LLM fails
+            print(f"⚠️  LLM name generation failed ({e}), using fallback")
+            fallback = problem_dict.get('description', 'generated_problem')[:50]
+            import re
+            fallback = re.sub(r'[^a-zA-Z0-9_-]', '_', fallback.lower())
+            fallback = re.sub(r'_+', '_', fallback).strip('_')
+            return fallback or 'generated_problem'
     
     def save_optimized_generator(self, name: str, save_dir: str = "optimized_generators", 
                                 description: str = ""):
@@ -634,18 +650,30 @@ class ProblemGenerator:
         raise ValueError(f"Problem with ID '{problem_id}' not found in dataset")
     
     def _sample_problems(self, n: int = 5, split: str = "train", filter_with_ground_truth: bool = False):
-        """Sample n problems from the dataset."""
-        dataset = self._load_dataset(split=split, streaming=True)
-        samples = []
+        """Sample n problems randomly from the dataset."""
+        import random
         
-        for i, row in enumerate(dataset):
-            if filter_with_ground_truth and not row.get("gold_standard_solution"):
-                continue
-                
-            samples.append(row)
-            
-            if len(samples) >= n:
-                break
+        # Load the full dataset (non-streaming) to enable random sampling
+        dataset = self._load_dataset(split=split, streaming=False)
+        
+        # Filter problems if needed
+        if filter_with_ground_truth:
+            dataset = dataset.filter(lambda x: x.get("gold_standard_solution"))
+        
+        # Get the total number of available problems
+        total_problems = len(dataset)
+        
+        if total_problems == 0:
+            return []
+        
+        # Sample randomly
+        if total_problems <= n:
+            # If we have fewer problems than requested, return all
+            samples = [dataset[i] for i in range(total_problems)]
+        else:
+            # Randomly sample n indices
+            random_indices = random.sample(range(total_problems), n)
+            samples = [dataset[i] for i in random_indices]
         
         return samples
     
@@ -706,9 +734,9 @@ class ProblemGenerator:
         return generators
     
     def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
-                                  exploit_description: str = "", output_dir: str = None, 
+                                  exploit_description: str = "", 
                                   provided_exploit: str = "", provided_insecure_verifier: str = "",
-                                  provided_secure_verifier: str = "", max_attempts: int = 3) -> Dict[str, Any]:
+                                  provided_secure_verifier: str = "") -> Dict[str, Any]:
         """
         Import a problem from the PrimeIntellect dataset and generate verifiers/exploits.
         
@@ -716,11 +744,9 @@ class ProblemGenerator:
             problem_id: Specific problem ID to import (optional)
             row: Direct dataset row to import (optional, overrides problem_id)
             exploit_description: Description of the vulnerability to introduce (required)
-            output_dir: Directory to save the problem (optional)
             provided_exploit: Pre-written exploit code (optional)
             provided_insecure_verifier: Pre-written insecure verifier (optional)
             provided_secure_verifier: Pre-written secure verifier (optional)
-            max_attempts: Maximum generation attempts
             
         Returns:
             Dictionary containing the import result
@@ -745,6 +771,7 @@ class ProblemGenerator:
             
             prompt = row.get("prompt", "")
             ground_truth = row.get("gold_standard_solution", "")
+            test_cases = row.get("verification_info", "")
             
             if not prompt:
                 return {
@@ -768,7 +795,7 @@ class ProblemGenerator:
                 exploit_description=exploit_description,
                 problem_description=prompt,
                 ground_truth_solution=ground_truth,
-                max_attempts=max_attempts
+                test_cases=test_cases
             )
             
             if result["success"]:
@@ -797,11 +824,6 @@ class ProblemGenerator:
                     except Exception as e:
                         print(f"⚠️  Warning: Re-validation failed: {e}")
                 
-                # Save to filesystem if output_dir provided
-                if output_dir:
-                    self.save_problem(result["problem_dict"], output_dir, result.get("problem"))
-                    print(f"💾 Problem saved to {output_dir}")
-                
                 # Add source metadata
                 result["source_metadata"] = {
                     "source": row.get("source", "unknown"),
@@ -829,8 +851,7 @@ class ProblemGenerator:
                 "error": error_msg
             }
     
-    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
-                         max_attempts: int = 3) -> List[Dict[str, Any]]:
+    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True) -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the PrimeIntellect dataset.
         
@@ -838,7 +859,6 @@ class ProblemGenerator:
             exploit_description: Description of the vulnerability to introduce (required)
             n: Number of problems to sample and import
             filter_with_ground_truth: Only sample problems that have ground truth solutions
-            max_attempts: Maximum generation attempts per problem
             
         Returns:
             List of import results
@@ -863,8 +883,7 @@ class ProblemGenerator:
                 
                 result = self.import_from_prime_intellect(
                     row=row, 
-                    exploit_description=exploit_description,
-                    max_attempts=max_attempts
+                    exploit_description=exploit_description
                 )
                 results.append(result)
                 

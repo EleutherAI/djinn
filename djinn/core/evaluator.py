@@ -13,6 +13,7 @@ from enum import Enum
 import dspy
 from dspy.teleprompt import LabeledFewShot
 from djinn.core.problem import Problem
+from djinn.generation.modules import extract_code_from_guards
 from pathlib import Path
 
 class DifficultyLevel(Enum):
@@ -166,7 +167,7 @@ class ProblemEvaluator:
     
     def _setup_model(self, model_name: str) -> dspy.LM:
         """Setup DSPy with specific OpenRouter model"""
-        max_tokens = 16000  # default
+        max_tokens = 32768  # default
 
             
         return dspy.LM(
@@ -201,10 +202,13 @@ class ProblemEvaluator:
                 
                 response = solver(problem_description=problem.description)
                 
+                # Clean the code response to remove any markdown guards
+                clean_solution_code = extract_code_from_guards(response.solution_code)
+                
                 # Test if the solution works by running it through verifier
                 from djinn.sandbox.verification_service import get_verification_service
                 service = get_verification_service()
-                result = service.verify_single(problem, response.solution_code)
+                result = service.verify_single(problem, clean_solution_code)
                 total_attempts += 1
                 
                 if result.secure_status.value == "passed" and result.insecure_status.value == "passed":
@@ -260,10 +264,13 @@ class ProblemEvaluator:
                     verifier_weakness=problem.insecure_verifier_info
                 )
                 
+                # Clean the code response to remove any markdown guards
+                clean_exploit_code = extract_code_from_guards(response.exploit_code)
+                
                 # Test if the exploit works
                 from djinn.sandbox.verification_service import get_verification_service
                 service = get_verification_service()
-                result = service.verify_single(problem, response.exploit_code)
+                result = service.verify_single(problem, clean_exploit_code)
                 total_attempts += 1
                 
                 expected_status = problem.exploit_expected_status

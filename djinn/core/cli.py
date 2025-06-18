@@ -181,16 +181,19 @@ def handle_generate(args):
             getattr(args, 'insecure_verifier_file', None),
         ])
         
-        # Validate argument combinations
-        operation_count = sum([bool(has_exploit_list), bool(has_dataset_import), bool(args.exploit)])
-        if operation_count == 0:
-            print("Error: Must specify one of:")
-            print("  - Single generation: --exploit 'description'")
-            print("  - Batch generation: --exploit-list-file file.txt")
-            print("  - Dataset import: --problem-id ID or --sample N")
+        # --exploit is required unless using --exploit-list-file
+        if not has_exploit_list and not args.exploit:
+            print("Error: --exploit is required. Specify the vulnerability to introduce.")
+            print("Examples:")
+            print("  - Single generation: --exploit 'buffer overflow in string handling'")
+            print("  - Dataset import: --exploit 'timing attack' --sample 3")
+            print("  - Component-based: --exploit 'sql injection' --problem-description-file desc.txt")
             exit(1)
-        elif operation_count > 1:
-            print("Error: Cannot combine --exploit, --exploit-list-file, --problem-id, and --sample")
+        
+        # Cannot specify both --exploit and --exploit-list-file
+        if has_exploit_list and args.exploit:
+            print("Error: Cannot specify both --exploit and --exploit-list-file")
+            print("Use --exploit for single exploits, --exploit-list-file for batch generation")
             exit(1)
         
         # For single problem generation/import, --out is required unless using dataset sampling
@@ -285,8 +288,7 @@ def handle_single_generate(args, generator):
         result = generator.generate_from_components(
             exploit_description=args.exploit,
             problem_description=components['problem_description'],
-            ground_truth_solution=components.get('ground_truth', ''),
-            max_attempts=args.max_attempts
+            ground_truth_solution=components.get('ground_truth', '')
         )
         
         if result["success"]:
@@ -347,9 +349,39 @@ def handle_dataset_import(args, generator):
             filter_with_ground_truth=args.filter_ground_truth,
         )
         
-        successful = sum(1 for r in results if r.get("success", False))
+        # Save successful results with generated directory names
+        successful = 0
+        for i, result in enumerate(results, 1):
+            if result.get("success", False):
+                # Generate LLM-based directory name
+                try:
+                    llm_name = generator.generate_directory_name(result["problem_dict"])
+                    problem_name = f"{llm_name}_{i:03d}"
+                except Exception as e:
+                    print(f"⚠️  Failed to generate LLM name for sample {i}: {e}")
+                    # Fallback to basic naming
+                    safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in args.exploit[:30])
+                    problem_name = f"{safe_exploit_name}_{i:03d}"
+                
+                # Generate output directory path
+                if args.out:
+                    # User provided base directory
+                    output_dir = f"{args.out}/{problem_name}"
+                else:
+                    # Default directory structure
+                    output_dir = f"imported_problems/{problem_name}"
+                
+                # Save the problem
+                generator.save_problem(result["problem_dict"], output_dir, result.get("problem"))
+                print(f"💾 Sample {i} saved to {output_dir}")
+                successful += 1
+        
         if successful > 0:
-            print(f"🎉 Successfully imported {successful} out of {len(results)} problems!")
+            print(f"🎉 Successfully imported and saved {successful} out of {len(results)} problems!")
+            if args.out:
+                print(f"📁 Problems saved to {args.out}/ with LLM-generated names")
+            else:
+                print(f"📁 Problems saved to imported_problems/ with LLM-generated names")
         else:
             print("💥 No problems were successfully imported")
             exit(1)
@@ -359,22 +391,26 @@ def handle_dataset_import(args, generator):
         result = generator.import_from_prime_intellect(
             problem_id=args.problem_id,
             exploit_description=args.exploit,
-            output_dir=args.out,
             provided_exploit=components.get('exploit', ''),
-            provided_insecure_verifier=components.get('insecure_verifier', ''),
-            max_attempts=args.max_attempts
+            provided_insecure_verifier=components.get('insecure_verifier', '')
         )
         
         if result["success"]:
-            print(f"🎉 Problem imported successfully!")
+            # Save the problem if output directory provided
             if args.out:
-                print(f"   Saved to: {args.out}")
+                generator.save_problem(result["problem_dict"], args.out, result.get("problem"))
+                print(f"🎉 Problem imported successfully and saved to {args.out}")
+            else:
+                print(f"🎉 Problem imported successfully!")
         else:
             print(f"💥 Problem import failed: {result.get('error', 'Unknown error')}")
             exit(1)
 
 def handle_batch_generate_from_file(args, generator):
     """Handle batch generation from a file containing exploit descriptions."""
+    
+    # Check if this is batch dataset import (exploit list + sample/problem_id)
+    has_dataset_import = (hasattr(args, 'problem_id') and args.problem_id) or (hasattr(args, 'sample') and args.sample)
     
     try:
         # Read exploit descriptions from file
@@ -413,17 +449,18 @@ def handle_batch_generate_from_file(args, generator):
                         output_dir = f"generated_problems/{safe_exploit_name}/sample_{j+1:02d}"
                     
                     try:
-                        success = generator.generate_and_save(
-                            exploit_description=exploit_description,
-                            output_dir=output_dir,
-                            max_attempts=args.max_attempts
-                        )
+                        print(f"🚀 Generating problem for: '{exploit_description[:50]}...'")
+                        
+                        result = generator.generate_problem(exploit_description)
                         
                         exploit_attempted += 1
-                        if success:
+                        if result["success"]:
+                            generator.save_problem(result["problem_dict"], output_dir, result.get("problem"))
+                            print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
                             exploit_successful += 1
                             exploit_results.append({"success": True, "output_dir": output_dir})
                         else:
+                            print(f"💥 Problem generation failed: {result['error']}")
                             exploit_results.append({"success": False, "output_dir": output_dir})
                     
                     except Exception as e:

@@ -115,14 +115,15 @@ from djinn.generation import ProblemGenerator
 # Initialize generator
 generator = ProblemGenerator()
 
-# Generate and save a problem
-success = generator.generate_and_save(
-    exploit_description="buffer overflow in string concatenation",
-    output_dir="problems/buffer_overflow"
-)
+# Generate a problem
+result = generator.generate_problem("buffer overflow in string concatenation")
 
-if success:
-    print("Problem generated successfully!")
+if result["success"]:
+    # Save the problem
+    generator.save_problem(result["problem_dict"], "problems/buffer_overflow", result.get("problem"))
+    print("Problem generated and saved successfully!")
+else:
+    print(f"Problem generation failed: {result['error']}")
 ```
 
 ## Architecture
