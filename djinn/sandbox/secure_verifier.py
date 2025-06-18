@@ -8,6 +8,7 @@ import time
 import faulthandler
 import platform
 import sys
+import traceback
 from io import StringIO
 from typing import List, Tuple
 
@@ -213,14 +214,16 @@ def verify_function_submission(submission_code: str, function_name: str, test_ca
         )
         
     except SyntaxError as e:
+        stack_trace = traceback.format_exc()
         return SingleVerificationResult(
             status=VerificationStatus.FAILED,
-            feedback=f"Syntax error in submission: {str(e)}"
+            feedback=f"Syntax error in submission: {str(e)}\nStack trace:\n{stack_trace}"
         )
     except Exception as e:
+        stack_trace = traceback.format_exc()
         return SingleVerificationResult(
             status=VerificationStatus.FAILED,  
-            feedback=f"Error executing submission: {str(e)}"
+            feedback=f"Error executing submission: {str(e)}\nStack trace:\n{stack_trace}"
         )
     finally:
         # Ensure alarm is always cleared

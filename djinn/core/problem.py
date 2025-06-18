@@ -6,16 +6,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Tuple
 from dotenv import load_dotenv
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult
-from djinn.utils.verification import verify_function_submission
-from e2b import Sandbox
-from e2b.exceptions import TimeoutException
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
-
-SANDBOX_RUNNER_PATH = Path(__file__).parent.parent / "sandbox" / "runner.py"
-SANDBOX_DEFS_PATH = Path(__file__).parent / "sandbox_defs.py"
-SECURE_VERIFIER_PATH = Path(__file__).parent.parent / "sandbox" / "secure_verifier.py"
 
 @dataclass
 class Problem:
@@ -29,6 +22,7 @@ class Problem:
     insecure_verifier: str              # code defining `verify(submission) -> VerificationResult`
     insecure_verifier_info: str         # information about the insecure verifier's weakness
     exploit_explanation: str
+    info_leak_method: str = ""          # method used to leak verifier info (e.g., 'embedded code excerpt', 'debug log')
     exploit_expected_status: str = "passed" # e.g. "passed", "timed_out", "crashed"
     keywords: List[str] = field(default_factory=list)
     # Detailed evaluation fields
@@ -42,122 +36,39 @@ class Problem:
     problem_appears_as: Optional[str] = None
     exploit_finding_appearance: Optional[float] = None
 
-    def _verify_local(self, submission_code: str) -> "VerificationResult":
+    def _normalize_test_cases(self) -> List[Tuple]:
         """
-        Runs both secure and insecure verifiers on a given submission using local exec.
-        WARNING: This is not sandboxed and is insecure.
+        Normalize test_cases to ensure they're a proper list of tuples.
+        Handles cases where test_cases might be:
+        - Empty list []
+        - String representation of tuples "[(1, 2), (3, 4)]"  
+        - Already proper list of tuples
         """
-        # Use the function-based secure verifier
-        secure_result = verify_function_submission(
-            submission_code=submission_code,
-            function_name=self.function_name,
-            test_cases=self.test_cases,
-            timeout=6,
-            max_memory_gb=4
-        )
+        if not self.test_cases:
+            return []
         
-        # Run the insecure verifier (still string-based)
-        def run_insecure_verifier(verifier_code: str) -> tuple[VerificationStatus, Optional[str]]:
-            verifier_globals = {}
+        # If it's a string, parse it
+        if isinstance(self.test_cases, str):
             try:
-                exec(verifier_code, verifier_globals)
-                verify_func = verifier_globals["verify"]
-                result = verify_func(submission_code)
-                return result.status, result.feedback
-            except Exception as e:
-                return VerificationStatus.CRASHED, str(e)
+                import ast
+                return ast.literal_eval(self.test_cases)
+            except (ValueError, SyntaxError):
+                return []
         
-        insecure_status, insecure_feedback = run_insecure_verifier(self.insecure_verifier)
-        
-        return VerificationResult(
-            secure_status=VerificationStatus(secure_result.status),
-            insecure_status=insecure_status,
-            secure_feedback=secure_result.feedback,
-            insecure_feedback=insecure_feedback
-        )
-
-    def _verify_sandboxed(self, submission_code: str) -> "VerificationResult":
-        """
-        Runs both secure and insecure verifiers on a given submission inside an E2B sandbox.
-        """
-        try:
-            with Sandbox() as sandbox:
-                # Upload insecure verifier, submission, runner, and shared definitions
-                sandbox.files.write("/home/user/_insecure_verifier.py", self.insecure_verifier.encode())
-                sandbox.files.write("/home/user/submission.py", submission_code.encode())
-                
-                # Upload the standalone secure verifier
-                secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
-                sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
-                
-                # Create a secure verifier script that uses the standalone verifier
-                secure_verifier_script = f'''
-from secure_verifier import verify as verify_function
-
-def verify(submission_code: str):
-    """Secure verifier using standalone approach."""
-    return verify_function(
-        submission_code=submission_code,
-        function_name="{self.function_name}",
-        test_cases={repr(self.test_cases)}
-    )
-'''
-                sandbox.files.write("/home/user/_secure_verifier.py", secure_verifier_script.encode())
-                
-                runner_code = SANDBOX_RUNNER_PATH.read_text()
-                sandbox.files.write("/home/user/_runner.py", runner_code.encode())
-                
-                defs_code = SANDBOX_DEFS_PATH.read_text()
-                sandbox.files.write("/home/user/_sandbox_defs.py", defs_code.encode())
-
-                # Execute the runner script in the sandbox
-                result = sandbox.commands.run("python /home/user/_runner.py", timeout=10)
-
-                if result.exit_code != 0:
-                    # Combine stdout and stderr for more complete feedback on failure
-                    feedback = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
-                    return VerificationResult(
-                        secure_status=VerificationStatus.CRASHED,
-                        insecure_status=VerificationStatus.CRASHED,
-                        secure_feedback=feedback,
-                        insecure_feedback=feedback
-                    )
-
-                # Parse the result from stdout
-                result_json = json.loads(result.stdout)
-                return VerificationResult(
-                    secure_status=VerificationStatus(result_json["secure_status"]),
-                    insecure_status=VerificationStatus(result_json["insecure_status"]),
-                    secure_feedback=result_json.get("secure_feedback"),
-                    insecure_feedback=result_json.get("insecure_feedback")
-                )
-        except TimeoutException:
-            return VerificationResult(
-                secure_status=VerificationStatus.TIMED_OUT,
-                insecure_status=VerificationStatus.TIMED_OUT,
-                secure_feedback="Sandbox execution timed out after 10 seconds.",
-                insecure_feedback="Sandbox execution timed out after 10 seconds."
-            )
-        except Exception as e:
-            # This catches errors with the sandbox itself (e.g., connection issues)
-            feedback = f"Sandbox execution failed: {e}"
-            return VerificationResult(
-                secure_status=VerificationStatus.CRASHED,
-                insecure_status=VerificationStatus.CRASHED,
-                secure_feedback=feedback,
-                insecure_feedback=feedback
-            )
+        # If it's already a list, return as is
+        if isinstance(self.test_cases, list):
+            return self.test_cases
+            
+        return []
 
     def verify(self, submission_code: str) -> "VerificationResult":
         """
-        Runs the problem's verifier on a given submission.
-        Uses E2B sandbox if E2B_API_KEY is set, otherwise falls back to local exec.
+        Runs the problem's verifier on a given submission using the sandbox verification service.
         """
-        if os.getenv("E2B_API_KEY"):
-            return self._verify_sandboxed(submission_code)
-        else:
-            print("WARNING: E2B_API_KEY not set. Running verification locally without sandboxing. This is insecure.")
-            return self._verify_local(submission_code)
+        from djinn.sandbox.verification_service import get_verification_service
+        
+        service = get_verification_service()
+        return service.verify_single(self, submission_code)
 
     def check_consistency(self):
         """

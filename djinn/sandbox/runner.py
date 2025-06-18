@@ -57,8 +57,8 @@ def main():
         if result:
             output = asdict(result)
             # Convert enums to their string values for JSON serialization
-            output['secure_status'] = output['secure_status'].value
-            output['insecure_status'] = output['insecure_status'].value
+            output['secure_status'] = output['secure_status'].value if hasattr(output['secure_status'], 'value') else output['secure_status']
+            output['insecure_status'] = output['insecure_status'].value if hasattr(output['insecure_status'], 'value') else output['insecure_status']
             print(json.dumps(output))
 
 if __name__ == "__main__":

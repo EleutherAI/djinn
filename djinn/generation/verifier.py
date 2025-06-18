@@ -1,7 +1,7 @@
 """Standardized secure verifier generation for consistent problem evaluation."""
 
 from typing import List, Tuple, Dict, Any, Optional
-from djinn.utils.verification import verify_function_submission, VerificationStatus
+from djinn.core.sandbox_defs import VerificationStatus
 
 def test_verifier_with_code(verifier_code: str, submission_code: str) -> dict:
     """
@@ -14,27 +14,10 @@ def test_verifier_with_code(verifier_code: str, submission_code: str) -> dict:
     Returns:
         Dict with status, feedback, and any errors
     """
-    try:
-        # Execute verifier code
-        namespace = {"__builtins__": __builtins__}
-        exec(verifier_code, namespace)
-        
-        if "verify" not in namespace:
-            return {"error": "Verifier does not define a 'verify' function"}
-        
-        verify_func = namespace["verify"]
-        
-        # Run verification
-        result = verify_func(submission_code)
-        
-        return {
-            "status": getattr(result, 'status', None),
-            "feedback": getattr(result, 'feedback', None),
-            "error": None
-        }
-        
-    except Exception as e:
-        return {"error": f"Verifier execution failed: {str(e)}"}
+    from djinn.sandbox.verification_service import get_verification_service
+    
+    service = get_verification_service()
+    return service.test_verifier_with_code(verifier_code, submission_code)
 
 
 def verify_problem_consistency(ground_truth: str, exploit: str, function_name: str, 
@@ -67,17 +50,23 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
     
     try:
         # Test ground truth against secure verifier (should pass)
-        gt_secure_result = verify_function_submission(
+        from djinn.sandbox.verification_service import get_verification_service
+        service = get_verification_service()
+        
+        gt_secure_result = service.verify_function_submission(
             submission_code=ground_truth,
             function_name=function_name,
             test_cases=test_cases
         )
         results["ground_truth_secure"] = {
-            "status": gt_secure_result.status,
-            "feedback": gt_secure_result.feedback
+            "status": gt_secure_result.get("status"),
+            "feedback": gt_secure_result.get("feedback")
         }
-        if gt_secure_result.status != VerificationStatus.PASSED:
-            results["errors"].append(f"Ground truth failed secure verifier: {gt_secure_result.feedback}")
+        if gt_secure_result.get("error"):
+            results["errors"].append(f"Ground truth secure verifier error: {gt_secure_result['error']}")
+            results["is_consistent"] = False
+        elif gt_secure_result.get("status") != VerificationStatus.PASSED.value:
+            results["errors"].append(f"Ground truth failed secure verifier: {gt_secure_result.get('feedback')}")
             results["is_consistent"] = False
         
         # Test ground truth against insecure verifier (should pass)
@@ -86,22 +75,25 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
         if gt_insecure.get("error"):
             results["errors"].append(f"Ground truth insecure verifier error: {gt_insecure['error']}")
             results["is_consistent"] = False
-        elif gt_insecure.get("status") != VerificationStatus.PASSED:
+        elif gt_insecure.get("status") != VerificationStatus.PASSED.value:
             results["errors"].append(f"Ground truth failed insecure verifier: {gt_insecure.get('feedback', 'unknown error')}")
             results["is_consistent"] = False
         
         # Test exploit against secure verifier (should fail)
-        exploit_secure_result = verify_function_submission(
+        exploit_secure_result = service.verify_function_submission(
             submission_code=exploit,
             function_name=function_name,
             test_cases=test_cases
         )
         results["exploit_secure"] = {
-            "status": exploit_secure_result.status,
-            "feedback": exploit_secure_result.feedback
+            "status": exploit_secure_result.get("status"),
+            "feedback": exploit_secure_result.get("feedback")
         }
-        if exploit_secure_result.status == VerificationStatus.PASSED:
-            results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_secure_result.feedback}")
+        if exploit_secure_result.get("error"):
+            results["errors"].append(f"Exploit secure verifier error: {exploit_secure_result['error']}")
+            results["is_consistent"] = False
+        elif exploit_secure_result.get("status") == VerificationStatus.PASSED.value:
+            results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_secure_result.get('feedback')}")
             results["is_consistent"] = False
         
         # Test exploit against insecure verifier (should pass with expected status)
@@ -110,14 +102,14 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
         if exploit_insecure.get("error"):
             results["errors"].append(f"Exploit insecure verifier error: {exploit_insecure['error']}")
             results["is_consistent"] = False
-        elif exploit_insecure.get("status") != VerificationStatus.PASSED:
+        elif exploit_insecure.get("status") != VerificationStatus.PASSED.value:
             results["errors"].append(f"Exploit failed insecure verifier: expected VerificationStatus.PASSED, got {exploit_insecure.get('status')}")
             results["is_consistent"] = False
         
         # Test nulls against both verifiers (should fail both)
         if nulls:
             for i, null_code in enumerate(nulls):
-                null_secure_result = verify_function_submission(
+                null_secure_result = service.verify_function_submission(
                     submission_code=null_code,
                     function_name=function_name,
                     test_cases=test_cases
@@ -126,20 +118,20 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
                 
                 null_result = {
                     "secure": {
-                        "status": null_secure_result.status,
-                        "feedback": null_secure_result.feedback
+                        "status": null_secure_result.get("status"),
+                        "feedback": null_secure_result.get("feedback")
                     },
                     "insecure": null_insecure,
                     "passes_consistency": True
                 }
                 
                 # Check if null fails both verifiers (as expected)
-                if null_insecure.get("error"):
+                if null_insecure.get("error") or null_secure_result.get("error"):
                     results["errors"].append(f"Null {i+1} verifier execution error")
                     null_result["passes_consistency"] = False
                     results["is_consistent"] = False
-                elif (null_secure_result.status == VerificationStatus.PASSED or 
-                      null_insecure.get("status") == VerificationStatus.PASSED):
+                elif (null_secure_result.get("status") == VerificationStatus.PASSED.value or 
+                      null_insecure.get("status") == VerificationStatus.PASSED.value):
                     results["errors"].append(f"Null {i+1} unexpectedly passed a verifier")
                     null_result["passes_consistency"] = False
                     results["is_consistent"] = False
@@ -173,11 +165,11 @@ def get_consistency_summary(verification_results: Dict[str, Any]) -> str:
     gt_insecure = verification_results["ground_truth_insecure"]
     
     if gt_secure and not gt_secure.get("error"):
-        status = "✅ PASS" if gt_secure.get("status") == VerificationStatus.PASSED else "❌ FAIL"
+        status = "✅ PASS" if gt_secure.get("status") == VerificationStatus.PASSED.value else "❌ FAIL"
         summary += f"Ground Truth vs Secure: {status}\n"
     
     if gt_insecure and not gt_insecure.get("error"):
-        status = "✅ PASS" if gt_insecure.get("status") == VerificationStatus.PASSED else "❌ FAIL"
+        status = "✅ PASS" if gt_insecure.get("status") == VerificationStatus.PASSED.value else "❌ FAIL"
         summary += f"Ground Truth vs Insecure: {status}\n"
     
     # Exploit results
@@ -185,11 +177,11 @@ def get_consistency_summary(verification_results: Dict[str, Any]) -> str:
     exploit_insecure = verification_results["exploit_insecure"]
     
     if exploit_secure and not exploit_secure.get("error"):
-        status = "✅ FAIL" if exploit_secure.get("status") != VerificationStatus.PASSED else "❌ PASS"
+        status = "✅ FAIL" if exploit_secure.get("status") != VerificationStatus.PASSED.value else "❌ PASS"
         summary += f"Exploit vs Secure: {status}\n"
     
     if exploit_insecure and not exploit_insecure.get("error"):
-        status = "✅ PASS" if exploit_insecure.get("status") == VerificationStatus.PASSED else "❌ FAIL"
+        status = "✅ PASS" if exploit_insecure.get("status") == VerificationStatus.PASSED.value else "❌ FAIL"
         summary += f"Exploit vs Insecure: {status}\n"
     
     # Nulls results

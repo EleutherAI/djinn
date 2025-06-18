@@ -68,9 +68,120 @@ class ProblemGenerator:
         lm = dspy.LM(
             model=self.model,
             api_key=self.api_key,
-            api_base="https://openrouter.ai/api/v1"
+            api_base="https://openrouter.ai/api/v1",
+            max_tokens=16000
         )
         dspy.configure(lm=lm)
+    
+    def _run_final_validation_and_alignment_check(self, result, exploit_description: str) -> Dict[str, Any]:
+        """
+        Run final validation and alignment checks on a generated problem.
+        
+        Args:
+            result: The result from the generation pipeline (DSPy result object or dict)
+            exploit_description: The original exploit description
+            
+        Returns:
+            Dictionary with success status and validation/alignment results or error info
+        """
+        print("🔍 Running final validation and alignment check...")
+        
+        # Handle both DSPy result objects and dictionary results
+        if hasattr(result, 'ground_truth'):
+            # DSPy result object with attributes
+            ground_truth = result.ground_truth
+            exploit = result.exploit
+            function_name = result.function_name
+            test_cases = result.test_cases
+            insecure_verifier = result.insecure_verifier
+            nulls = result.nulls if isinstance(result.nulls, str) else json.dumps(result.nulls)
+        elif isinstance(result, dict) and "problem_dict" in result:
+            # Dictionary result structure (from generate_from_components)
+            problem_dict = result["problem_dict"]
+            ground_truth = problem_dict["ground_truth"]
+            exploit = problem_dict["exploit"]
+            function_name = problem_dict["function_name"]
+            test_cases = problem_dict["test_cases"]
+            insecure_verifier = problem_dict["insecure_verifier"]
+            nulls = json.dumps(problem_dict.get("nulls", []))
+        else:
+            return {
+                "success": False,
+                "error": "Invalid result structure for validation check"
+            }
+        
+        # 1. Final validation check using the validation tool
+        try:
+            validation_result_str = self.test_case_generator._validate_problem_consistency(
+                ground_truth=ground_truth,
+                exploit=exploit,
+                function_name=function_name,
+                test_cases=test_cases,
+                insecure_verifier=insecure_verifier,
+                nulls=nulls
+            )
+            validation_result = json.loads(validation_result_str)
+            
+            if not validation_result.get("is_consistent", False):
+                print("❌ Problem failed final validation check")
+                print(f"   Validation summary: {validation_result.get('validation_summary', 'Unknown failure')}")
+                return {
+                    "success": False,
+                    "error": "Problem failed final validation check",
+                    "validation_result": validation_result,
+                    "validation_summary": validation_result.get('validation_summary', 'Unknown failure'),
+                    "validation_errors": validation_result.get('errors', [])
+                }
+            else:
+                print("✅ Final validation check passed")
+                
+        except Exception as e:
+            print(f"❌ Final validation check failed with exception: {e}")
+            return {
+                "success": False,
+                "error": f"Final validation check failed: {str(e)}",
+            }
+        
+        # 2. Final alignment check using the alignment tool
+        try:
+            alignment_result_str = self.test_case_generator._check_vulnerability_alignment(
+                exploit_code=exploit,
+                insecure_verifier_code=insecure_verifier,
+                exploit_description=exploit_description
+            )
+            alignment_result = json.loads(alignment_result_str)
+            
+            if not alignment_result.get("passes_check", False):
+                print("❌ Problem failed final alignment check")
+                print(f"   Alignment summary: {alignment_result.get('alignment_summary', 'Unknown failure')}")
+                print(f"   Positive score: {alignment_result.get('positive_alignment_score', 'N/A')}/10")
+                print(f"   Negative score: {alignment_result.get('negative_alignment_score', 'N/A')}/10")
+                return {
+                    "success": False,
+                    "error": "Problem failed final alignment check",
+                    "alignment_result": alignment_result,
+                    "alignment_summary": alignment_result.get('alignment_summary', 'Unknown failure'),
+                    "alignment_reasoning": alignment_result.get('alignment_reasoning', ''),
+                    "recommendations": alignment_result.get('recommendations', '')
+                }
+            else:
+                print("✅ Final alignment check passed")
+                print(f"   Positive score: {alignment_result.get('positive_alignment_score', 'N/A')}/10")
+                print(f"   Negative score: {alignment_result.get('negative_alignment_score', 'N/A')}/10")
+                
+        except Exception as e:
+            print(f"❌ Final alignment check failed with exception: {e}")
+            return {
+                "success": False,
+                "error": f"Final alignment check failed: {str(e)}",
+            }
+        
+        # If we get here, both checks passed
+        return {
+            "success": True,
+            "validation_result": validation_result,
+            "alignment_result": alignment_result
+        }
     
     def generate_problem(self, exploit_description: str) -> Dict[str, Any]:
         """
@@ -105,7 +216,8 @@ class ProblemGenerator:
                 "insecure_verifier_info": result.insecure_verifier_info,
                 "exploit_explanation": result.exploit_explanation,
                 "exploit_expected_status": "passed",
-                "keywords": []
+                "keywords": [],
+                "info_leak_method": result.info_leak_method
             }
             
             # Create the Problem object
@@ -116,7 +228,13 @@ class ProblemGenerator:
                     "success": False,
                     "error": f"Failed to create Problem object: {e}",
                 }
-                
+            
+            # FINAL VALIDATION AND ALIGNMENT CHECK
+            validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
+            
+            if not validation_check_result["success"]:
+                return validation_check_result
+            
             # Run detailed evaluation if enabled
             if self.enable_evaluation:
                 print("🔍 Running detailed evaluation...")
@@ -132,10 +250,13 @@ class ProblemGenerator:
                 "problem_dict": problem_dict,
                 "problem": problem,
                 "validation_feedback": "Problem generated and validated successfully",
+                "validation_result": validation_check_result["validation_result"],
                 "alignment_result": {
-                    "positive_score": getattr(result, 'positive_alignment_score', None),
-                    "negative_score": getattr(result, 'negative_alignment_score', None),
-                    "passes_check": getattr(result, 'passes_check', None)
+                    "positive_score": validation_check_result["alignment_result"].get('positive_alignment_score'),
+                    "negative_score": validation_check_result["alignment_result"].get('negative_alignment_score'),
+                    "passes_check": validation_check_result["alignment_result"].get('passes_check'),
+                    "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
+                    "recommendations": validation_check_result["alignment_result"].get('recommendations')
                 },
             }
         else:
@@ -182,7 +303,20 @@ class ProblemGenerator:
                 print("✅ Problem generated and validated successfully!")
                 
                 # Generate test cases for the problem (TODO item 7)
-                result["problem_dict"] = self._generate_test_cases_for_problem(result["problem_dict"])
+                # result["problem_dict"] = self._generate_test_cases_for_problem(result["problem_dict"])
+                
+                # FINAL VALIDATION AND ALIGNMENT CHECK
+                validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
+                
+                if not validation_check_result["success"]:
+                    # Convert validation failure to attempt failure for retry
+                    failure_reason = validation_check_result.get('error', 'Validation or alignment check failed')
+                    print(f"❌ Attempt {attempt + 1} failed: {failure_reason}")
+                    failure_feedback.append(failure_reason)
+                    
+                    if attempt < max_attempts - 1:
+                        print("🔄 Retrying with enhanced feedback...")
+                    continue
                 
                 # Run detailed evaluation if enabled
                 if self.enable_evaluation and result.get("problem"):
@@ -201,7 +335,14 @@ class ProblemGenerator:
                     "problem_dict": result["problem_dict"],
                     "problem": result["problem"],
                     "validation_feedback": result["validation_feedback"],
-                    "alignment_result": result.get("alignment_result"),
+                    "validation_result": validation_check_result["validation_result"],
+                    "alignment_result": {
+                        "positive_score": validation_check_result["alignment_result"].get('positive_alignment_score'),
+                        "negative_score": validation_check_result["alignment_result"].get('negative_alignment_score'),
+                        "passes_check": validation_check_result["alignment_result"].get('passes_check'),
+                        "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
+                        "recommendations": validation_check_result["alignment_result"].get('recommendations')
+                    },
                     "evaluation_result": result.get("evaluation_result"),
                     "attempts": attempt + 1,
                     "failure_history": failure_feedback
@@ -353,7 +494,8 @@ class ProblemGenerator:
             "exploit": problem_dict["exploit"],
             "insecure_verifier": problem_dict["insecure_verifier"],
             "insecure_verifier_info": problem_dict["insecure_verifier_info"],
-            "nulls": problem_dict["nulls"]
+            "nulls": problem_dict["nulls"],
+            "info_leak_method": problem_dict.get("info_leak_method", "")
         }
         
         # Add evaluation results if available from the Problem object

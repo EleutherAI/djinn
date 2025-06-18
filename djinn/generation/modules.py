@@ -39,8 +39,7 @@ class ProblemGenerationPipeline(dspy.Module):
         
         return self
     
-    def forward(self, exploit_description: str = "input validation", 
-                max_alignment_iterations: int = 3) -> dspy.Prediction:
+    def forward(self, exploit_description: str = "input validation") -> dspy.Prediction:
         """
         Generate a complete problem with vulnerability alignment checking.
         
@@ -59,15 +58,6 @@ class ProblemGenerationPipeline(dspy.Module):
         problem_result = self.generate_draft_problem(
             exploit_description=exploit_description
         )
-        
-        # Parse test cases from the generated problem for downstream use
-        test_cases = self._parse_test_cases(problem_result.test_cases)
-        
-        if not test_cases:
-            raise ValueError("Generated problem has invalid or empty test cases")
-        
-        # Store parsed test cases in the result
-        problem_result.test_cases = test_cases
         
         return problem_result
     
@@ -105,6 +95,7 @@ def _load_few_shot_examples():
                 # Optional fields with defaults
                 tools = example_data.get('tools', [])
                 insecure_verifier_info = example_data.get('insecure_verifier_info', '')
+                info_leak_method = example_data.get('info_leak_method', '')
                 
                 # Convert nulls from list to JSON string if it's a list
                 nulls = example_data.get('nulls', [])
@@ -127,7 +118,8 @@ def _load_few_shot_examples():
                     exploit_explanation=exploit_explanation,
                     test_cases=test_cases,
                     nulls=nulls,
-                    labels=labels
+                    labels=labels,
+                    info_leak_method=info_leak_method
                 )
                 examples.append(example)
                 

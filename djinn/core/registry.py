@@ -76,6 +76,7 @@ class ProblemRegistry:
             exploit_explanation=exploit_explanation,
             exploit_expected_status=exploit_expected_status,
             keywords=labels,
+            info_leak_method=config.get("info_leak_method", ""),
             evaluated_gt_difficulty=config.get("evaluated_gt_difficulty"),
             evaluated_exploit_difficulty=config.get("evaluated_exploit_difficulty"),
             gt_model_results=config.get("gt_model_results"),
