@@ -111,144 +111,95 @@ def verify(submission_code: str):
                 insecure_feedback=feedback
             )
     
-    def verify_function_submission(self, submission_code: str, function_name: str, 
-                                 test_cases: List[tuple], timeout: int = 6, 
-                                 max_memory_gb: int = 4) -> Dict[str, Any]:
+    def verify_problem_consistency(self, problem) -> Dict[str, Any]:
         """
-        Verify a function submission using only the secure verifier in sandbox.
+        Comprehensive verification of problem consistency.
+        Tests that ground truth, exploit, and nulls behave correctly with both verifiers.
         
         Args:
-            submission_code: The submitted code as a string
-            function_name: Name of the function to test
-            test_cases: List of (input, expected_output) tuples
-            timeout: Timeout in seconds for each test case
-            max_memory_gb: Maximum memory limit in GB
+            problem: Problem instance to check
             
         Returns:
-            Dict with status, feedback, and any errors
+            Dict with verification results and pass/fail status
         """
-        try:
-            with Sandbox() as sandbox:
-                # Upload submission
-                sandbox.files.write("/home/user/submission.py", submission_code.encode())
-                
-                # Upload the standalone secure verifier
-                secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
-                sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
-                
-                # Create a runner script for function verification
-                runner_script = f'''
-import json
-from secure_verifier import verify
-
-try:
-    with open("/home/user/submission.py", "r") as f:
-        submission_code = f.read()
-    
-    result = verify(
-        submission_code=submission_code,
-        function_name="{function_name}",
-        test_cases={test_cases!r}
-    )
-    
-    output = {{
-        "status": result.status.value if hasattr(result.status, 'value') else str(result.status),
-        "feedback": result.feedback,
-        "error": None
-    }}
-    print(json.dumps(output))
-    
-except Exception as e:
-    output = {{
-        "status": None,
-        "feedback": None,
-        "error": f"Verification failed: {{str(e)}}"
-    }}
-    print(json.dumps(output))
-'''
-                sandbox.files.write("/home/user/_function_runner.py", runner_script.encode())
-
-                # Execute the runner script
-                result = sandbox.commands.run("python /home/user/_function_runner.py", timeout=timeout + 5)
-                
-                if result.exit_code != 0:
-                    return {"error": f"Runner failed: {result.stderr}"}
-                
-                return json.loads(result.stdout)
-                
-        except Exception as e:
-            return {"error": f"Sandbox execution failed: {str(e)}"}
-    
-    def test_verifier_with_code(self, verifier_code: str, submission_code: str) -> Dict[str, Any]:
-        """
-        Test a verifier with submission code in sandbox.
+        results = {
+            "ground_truth_secure": None,
+            "ground_truth_insecure": None,
+            "exploit_secure": None,
+            "exploit_insecure": None,
+            "nulls_results": [],
+            "is_consistent": True,
+            "errors": []
+        }
         
-        Args:
-            verifier_code: The verifier code to execute
-            submission_code: The code to test
-            
-        Returns:
-            Dict with status, feedback, and any errors
-        """
         try:
-            with Sandbox() as sandbox:
-                # Upload verifier and submission
-                sandbox.files.write("/home/user/verifier.py", verifier_code.encode())
-                sandbox.files.write("/home/user/submission.py", submission_code.encode())
+            # Test ground truth - should pass both verifiers
+            gt_result = self.verify_single(problem, problem.ground_truth)
+            results["ground_truth_secure"] = {
+                "status": gt_result.secure_status.value,
+                "feedback": gt_result.secure_feedback
+            }
+            results["ground_truth_insecure"] = {
+                "status": gt_result.insecure_status.value,
+                "feedback": gt_result.insecure_feedback
+            }
+            
+            if gt_result.secure_status != VerificationStatus.PASSED:
+                results["errors"].append(f"Ground truth failed secure verifier: {gt_result.secure_feedback}")
+                results["is_consistent"] = False
+            if gt_result.insecure_status != VerificationStatus.PASSED:
+                results["errors"].append(f"Ground truth failed insecure verifier: {gt_result.insecure_feedback}")
+                results["is_consistent"] = False
+            
+            # Test exploit - should fail secure but pass insecure with expected status
+            exploit_result = self.verify_single(problem, problem.exploit)
+            results["exploit_secure"] = {
+                "status": exploit_result.secure_status.value,
+                "feedback": exploit_result.secure_feedback
+            }
+            results["exploit_insecure"] = {
+                "status": exploit_result.insecure_status.value,
+                "feedback": exploit_result.insecure_feedback
+            }
+            
+            expected_insecure_status = VerificationStatus(problem.exploit_expected_status)
+            if exploit_result.secure_status == VerificationStatus.PASSED:
+                results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_result.secure_feedback}")
+                results["is_consistent"] = False
+            if exploit_result.insecure_status != expected_insecure_status:
+                results["errors"].append(f"Exploit insecure status mismatch: expected {expected_insecure_status.value}, got {exploit_result.insecure_status.value}")
+                results["is_consistent"] = False
+            
+            # Test nulls - should fail both verifiers
+            for i, null_code in enumerate(problem.nulls):
+                null_result = self.verify_single(problem, null_code)
                 
-                # Create a runner script
-                runner_script = '''
-import json
-import importlib.util
-
-try:
-    # Load verifier
-    spec = importlib.util.spec_from_file_location("verifier", "/home/user/verifier.py")
-    verifier_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(verifier_module)
-    
-    if not hasattr(verifier_module, "verify"):
-        output = {"error": "Verifier does not define a 'verify' function"}
-        print(json.dumps(output))
-        exit(1)
-    
-    # Read submission
-    with open("/home/user/submission.py", "r") as f:
-        submission_code = f.read()
-    
-    # Run verification
-    result = verifier_module.verify(submission_code)
-    
-    status = getattr(result, 'status', None)
-    # Convert status to string if it's an enum
-    if hasattr(status, 'value'):
-        status = status.value
-    elif status is not None:
-        status = str(status)
-    
-    output = {
-        "status": status,
-        "feedback": getattr(result, 'feedback', None),
-        "error": None
-    }
-    print(json.dumps(output))
-    
-except Exception as e:
-    output = {"error": f"Verifier execution failed: {str(e)}"}
-    print(json.dumps(output))
-'''
-                sandbox.files.write("/home/user/_verifier_runner.py", runner_script.encode())
+                null_result_dict = {
+                    "secure": {
+                        "status": null_result.secure_status.value,
+                        "feedback": null_result.secure_feedback
+                    },
+                    "insecure": {
+                        "status": null_result.insecure_status.value,
+                        "feedback": null_result.insecure_feedback
+                    },
+                    "passes_consistency": True
+                }
                 
-                # Execute the runner script
-                result = sandbox.commands.run("python /home/user/_verifier_runner.py", timeout=10)
+                # Check if null fails both verifiers (as expected)
+                if (null_result.secure_status == VerificationStatus.PASSED or 
+                    null_result.insecure_status == VerificationStatus.PASSED):
+                    results["errors"].append(f"Null {i+1} unexpectedly passed a verifier")
+                    null_result_dict["passes_consistency"] = False
+                    results["is_consistent"] = False
                 
-                if result.exit_code != 0:
-                    return {"error": f"Verifier runner failed: {result.stderr}"}
-                
-                return json.loads(result.stdout)
-                
+                results["nulls_results"].append(null_result_dict)
+            
         except Exception as e:
-            return {"error": f"Sandbox execution failed: {str(e)}"}
+            results["errors"].append(f"Verification process error: {str(e)}")
+            results["is_consistent"] = False
+        
+        return results
 
 
 # Global service instance

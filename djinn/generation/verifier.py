@@ -3,28 +3,11 @@
 from typing import List, Tuple, Dict, Any, Optional
 from djinn.core.sandbox_defs import VerificationStatus
 
-def test_verifier_with_code(verifier_code: str, submission_code: str) -> dict:
-    """
-    Test a verifier with submission code and return the result.
-    
-    Args:
-        verifier_code: The verifier code to execute
-        submission_code: The code to test
-        
-    Returns:
-        Dict with status, feedback, and any errors
-    """
-    from djinn.sandbox.verification_service import get_verification_service
-    
-    service = get_verification_service()
-    return service.test_verifier_with_code(verifier_code, submission_code)
-
-
 def verify_problem_consistency(ground_truth: str, exploit: str, function_name: str, 
                              test_cases: List[tuple], insecure_verifier: str, 
                              nulls: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Comprehensive verification of problem consistency using function-based secure verification.
+    Comprehensive verification of problem consistency using sandboxed verification.
     Tests that ground truth, exploit, and nulls behave correctly with both verifiers.
     
     Args:
@@ -38,111 +21,26 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
     Returns:
         Dict with verification results and pass/fail status
     """
-    results = {
-        "ground_truth_secure": None,
-        "ground_truth_insecure": None,
-        "exploit_secure": None,
-        "exploit_insecure": None,
-        "nulls_results": [],
-        "is_consistent": True,
-        "errors": []
-    }
+    # Create a temporary problem-like object for consistency checking
+    from djinn.sandbox.verification_service import get_verification_service
     
-    try:
-        # Test ground truth against secure verifier (should pass)
-        from djinn.sandbox.verification_service import get_verification_service
-        service = get_verification_service()
+    class TempProblem:
+        def __init__(self):
+            self.ground_truth = ground_truth
+            self.exploit = exploit
+            self.function_name = function_name
+            self.test_cases = test_cases
+            self.insecure_verifier = insecure_verifier
+            self.nulls = nulls or []
+            self.exploit_expected_status = "passed"  # Default assumption
         
-        gt_secure_result = service.verify_function_submission(
-            submission_code=ground_truth,
-            function_name=function_name,
-            test_cases=test_cases
-        )
-        results["ground_truth_secure"] = {
-            "status": gt_secure_result.get("status"),
-            "feedback": gt_secure_result.get("feedback")
-        }
-        if gt_secure_result.get("error"):
-            results["errors"].append(f"Ground truth secure verifier error: {gt_secure_result['error']}")
-            results["is_consistent"] = False
-        elif gt_secure_result.get("status") != VerificationStatus.PASSED.value:
-            results["errors"].append(f"Ground truth failed secure verifier: {gt_secure_result.get('feedback')}")
-            results["is_consistent"] = False
-        
-        # Test ground truth against insecure verifier (should pass)
-        gt_insecure = test_verifier_with_code(insecure_verifier, ground_truth)
-        results["ground_truth_insecure"] = gt_insecure
-        if gt_insecure.get("error"):
-            results["errors"].append(f"Ground truth insecure verifier error: {gt_insecure['error']}")
-            results["is_consistent"] = False
-        elif gt_insecure.get("status") != VerificationStatus.PASSED.value:
-            results["errors"].append(f"Ground truth failed insecure verifier: {gt_insecure.get('feedback', 'unknown error')}")
-            results["is_consistent"] = False
-        
-        # Test exploit against secure verifier (should fail)
-        exploit_secure_result = service.verify_function_submission(
-            submission_code=exploit,
-            function_name=function_name,
-            test_cases=test_cases
-        )
-        results["exploit_secure"] = {
-            "status": exploit_secure_result.get("status"),
-            "feedback": exploit_secure_result.get("feedback")
-        }
-        if exploit_secure_result.get("error"):
-            results["errors"].append(f"Exploit secure verifier error: {exploit_secure_result['error']}")
-            results["is_consistent"] = False
-        elif exploit_secure_result.get("status") == VerificationStatus.PASSED.value:
-            results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_secure_result.get('feedback')}")
-            results["is_consistent"] = False
-        
-        # Test exploit against insecure verifier (should pass with expected status)
-        exploit_insecure = test_verifier_with_code(insecure_verifier, exploit)
-        results["exploit_insecure"] = exploit_insecure
-        if exploit_insecure.get("error"):
-            results["errors"].append(f"Exploit insecure verifier error: {exploit_insecure['error']}")
-            results["is_consistent"] = False
-        elif exploit_insecure.get("status") != VerificationStatus.PASSED.value:
-            results["errors"].append(f"Exploit failed insecure verifier: expected VerificationStatus.PASSED, got {exploit_insecure.get('status')}")
-            results["is_consistent"] = False
-        
-        # Test nulls against both verifiers (should fail both)
-        if nulls:
-            for i, null_code in enumerate(nulls):
-                null_secure_result = service.verify_function_submission(
-                    submission_code=null_code,
-                    function_name=function_name,
-                    test_cases=test_cases
-                )
-                null_insecure = test_verifier_with_code(insecure_verifier, null_code)
-                
-                null_result = {
-                    "secure": {
-                        "status": null_secure_result.get("status"),
-                        "feedback": null_secure_result.get("feedback")
-                    },
-                    "insecure": null_insecure,
-                    "passes_consistency": True
-                }
-                
-                # Check if null fails both verifiers (as expected)
-                if null_insecure.get("error") or null_secure_result.get("error"):
-                    results["errors"].append(f"Null {i+1} verifier execution error")
-                    null_result["passes_consistency"] = False
-                    results["is_consistent"] = False
-                elif (null_secure_result.get("status") == VerificationStatus.PASSED.value or 
-                      null_insecure.get("status") == VerificationStatus.PASSED.value):
-                    results["errors"].append(f"Null {i+1} unexpectedly passed a verifier")
-                    null_result["passes_consistency"] = False
-                    results["is_consistent"] = False
-                
-                results["nulls_results"].append(null_result)
-        
-    except Exception as e:
-        results["errors"].append(f"Verification process error: {str(e)}")
-        results["is_consistent"] = False
+        def _normalize_test_cases(self):
+            return self.test_cases if self.test_cases else []
     
-    return results
+    service = get_verification_service()
+    temp_problem = TempProblem()
+    
+    return service.verify_problem_consistency(temp_problem)
 
 
 def get_consistency_summary(verification_results: Dict[str, Any]) -> str:

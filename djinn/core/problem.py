@@ -74,53 +74,60 @@ class Problem:
         """
         Checks that the ground truth, exploit, and nulls behave as expected.
         """
+        from djinn.sandbox.verification_service import get_verification_service
+        
         print(f"▶️  Checking consistency for '{self.id}'...")
-
-        # 1. Check ground truth
-        gt_result = self.verify(self.ground_truth)
-        if gt_result.secure_status == VerificationStatus.PASSED and gt_result.insecure_status == VerificationStatus.PASSED:
+        
+        service = get_verification_service()
+        results = service.verify_problem_consistency(self)
+        
+        # Print results in user-friendly format
+        gt_secure = results["ground_truth_secure"]
+        gt_insecure = results["ground_truth_insecure"]
+        
+        if gt_secure["status"] == "passed" and gt_insecure["status"] == "passed":
             print(f"✅  Ground Truth: PASSED on both verifiers")
         else:
             print(f"❌  Ground Truth: FAILED")
-            print(f"    Secure: {gt_result.secure_status.value} ({gt_result.secure_feedback})")
-            print(f"    Insecure: {gt_result.insecure_status.value} ({gt_result.insecure_feedback})")
-            return False
-
-        # 2. Check exploit
-        exploit_result = self.verify(self.exploit)
-        expected_insecure_status = VerificationStatus(self.exploit_expected_status)
-        if exploit_result.secure_status != VerificationStatus.PASSED and exploit_result.insecure_status == expected_insecure_status:
-            print(f"✅  Exploit: FAILED on secure, {exploit_result.insecure_status.value.upper()} on insecure (matches expected)")
+            print(f"    Secure: {gt_secure['status']} ({gt_secure['feedback']})")
+            print(f"    Insecure: {gt_insecure['status']} ({gt_insecure['feedback']})")
+        
+        exploit_secure = results["exploit_secure"]
+        exploit_insecure = results["exploit_insecure"]
+        expected_status = self.exploit_expected_status
+        
+        if exploit_secure["status"] != "passed" and exploit_insecure["status"] == expected_status:
+            print(f"✅  Exploit: FAILED on secure, {exploit_insecure['status'].upper()} on insecure (matches expected)")
         else:
             print(f"❌  Exploit: FAILED")
-            print(f"    Secure: {exploit_result.secure_status.value} (expected: not PASSED)")
-            print(f"    Insecure: {exploit_result.insecure_status.value} (expected: {expected_insecure_status.value})")
-            if exploit_result.secure_feedback:
-                print(f"    Secure feedback: {exploit_result.secure_feedback}")
-            if exploit_result.insecure_feedback:
-                print(f"    Insecure feedback: {exploit_result.insecure_feedback}")
-            return False
-
-        # 3. Check nulls
-        all_nulls_passed = True
-        for i, null_code in enumerate(self.nulls):
-            null_result = self.verify(null_code)
-            if null_result.secure_status != VerificationStatus.PASSED and null_result.insecure_status != VerificationStatus.PASSED:
+            print(f"    Secure: {exploit_secure['status']} (expected: not PASSED)")
+            print(f"    Insecure: {exploit_insecure['status']} (expected: {expected_status})")
+            if exploit_secure["feedback"]:
+                print(f"    Secure feedback: {exploit_secure['feedback']}")
+            if exploit_insecure["feedback"]:
+                print(f"    Insecure feedback: {exploit_insecure['feedback']}")
+        
+        # Check nulls
+        for i, null_result in enumerate(results["nulls_results"]):
+            if null_result["passes_consistency"]:
                 print(f"✅  Null #{i+1}: FAILED on both verifiers")
             else:
                 print(f"❌  Null #{i+1}: FAILED - should fail both verifiers")
-                print(f"    Secure: {null_result.secure_status.value}")
-                print(f"    Insecure: {null_result.insecure_status.value}")
-                all_nulls_passed = False
+                print(f"    Secure: {null_result['secure']['status']}")
+                print(f"    Insecure: {null_result['insecure']['status']}")
         
-        if all_nulls_passed:
+        if results["is_consistent"]:
             print("--------------------")
             print("PASSED: All checks passed.")
         else:
             print("--------------------")
-            print("FAILED: One or more null checks failed.")
+            print("FAILED: One or more checks failed.")
+            if results["errors"]:
+                print("Errors:")
+                for error in results["errors"]:
+                    print(f"  - {error}")
 
-        return all_nulls_passed 
+        return results["is_consistent"]
     
     def apply_evaluation_results(self, eval_result: "EvaluationResult"):
         """Apply evaluation results to this problem instance"""
