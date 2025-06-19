@@ -67,6 +67,12 @@ class TestCaseGenerator:
             name="check_ground_truth",
             desc="Check that a ground truth solution correctly implements the required function and passes test cases"
         )
+
+        self.check_nulls_tool = dspy.Tool(
+            self._check_nulls_against_test_cases,
+            name="check_nulls",
+            desc="Check that a null solutions do not pass the verifier"
+        )
         
         # List of all tools for easy access
         self.tools = [
@@ -182,7 +188,7 @@ class TestCaseGenerator:
             "αβγ",        # unicode
         ]
     
-    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None) -> List[Tuple[Any, Any]]:
+    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None) -> Dict[str, Any]:
         """
         Run ground truth code with test inputs in E2B sandbox to generate input/output pairs.
         
@@ -192,11 +198,27 @@ class TestCaseGenerator:
             function_name: Name of the function to call (auto-detected if None)
             
         Returns:
-            List of (input, output) tuples
+            Dictionary containing:
+            - 'test_cases': List of (input, output) tuples
+            - 'success': Boolean indicating overall success
+            - 'errors': List of error messages
+            - 'warnings': List of warning messages
+            - 'summary': String summary of the operation
         """
+        result = {
+            'test_cases': [],
+            'success': False,
+            'errors': [],
+            'warnings': [],
+            'summary': ''
+        }
+        
         if not os.getenv("E2B_API_KEY"):
-            print("⚠️  Warning: E2B_API_KEY not set. Cannot generate test cases in sandbox.")
-            return []
+            error_msg = "E2B_API_KEY not set. Cannot generate test cases in sandbox."
+            result['errors'].append(error_msg)
+            result['summary'] = "❌ FAIL - No E2B API key"
+            print(f"⚠️  Warning: {error_msg}")
+            return result
         
         try:
             with Sandbox() as sandbox:
@@ -208,10 +230,14 @@ class TestCaseGenerator:
                     function_name = self._extract_function_name(ground_truth_code)
                 
                 if not function_name:
-                    print("❌ Could not detect function name from ground truth code")
-                    return []
+                    error_msg = "Could not detect function name from ground truth code"
+                    result['errors'].append(error_msg)
+                    result['summary'] = "❌ FAIL - No function name detected"
+                    print(f"❌ {error_msg}")
+                    return result
                 
                 test_cases = []
+                failed_cases = []
                 
                 for i, test_input in enumerate(test_inputs):
                     try:
@@ -240,11 +266,11 @@ except Exception as e:
                         sandbox.files.write(f"/home/user/test_{i}.py", test_script.encode())
                         
                         # Run the test
-                        result = sandbox.commands.run(f"python /home/user/test_{i}.py", timeout=5)
+                        exec_result = sandbox.commands.run(f"python /home/user/test_{i}.py", timeout=5)
                         
-                        if result.exit_code == 0:
+                        if exec_result.exit_code == 0:
                             # Parse output
-                            lines = result.stdout.strip().split('\n')
+                            lines = exec_result.stdout.strip().split('\n')
                             input_line = None
                             output_line = None
                             
@@ -261,23 +287,58 @@ except Exception as e:
                                     test_cases.append((actual_input, actual_output))
                                     print(f"✅ Test case {i+1}: {actual_input} -> {actual_output}")
                                 except Exception as e:
-                                    print(f"⚠️  Failed to parse test case {i+1}: {e}")
+                                    parse_error = f"Failed to parse test case {i+1}: {e}"
+                                    result['warnings'].append(parse_error)
+                                    failed_cases.append(i+1)
+                                    print(f"⚠️  {parse_error}")
+                            else:
+                                missing_output_error = f"Test case {i+1}: missing input/output in execution result"
+                                result['warnings'].append(missing_output_error)
+                                failed_cases.append(i+1)
+                                print(f"⚠️  {missing_output_error}")
                         else:
-                            print(f"❌ Test case {i+1} failed: {result.stderr}")
+                            execution_error = f"Test case {i+1} failed: {exec_result.stderr}"
+                            result['warnings'].append(execution_error)
+                            failed_cases.append(i+1)
+                            print(f"❌ {execution_error}")
                             
                     except Exception as e:
-                        print(f"❌ Error running test case {i+1}: {e}")
+                        test_error = f"Error running test case {i+1}: {e}"
+                        result['warnings'].append(test_error)
+                        failed_cases.append(i+1)
+                        print(f"❌ {test_error}")
                         continue
                 
-                print(f"📊 Generated {len(test_cases)} test cases from {len(test_inputs)} inputs")
-                return test_cases
+                result['test_cases'] = test_cases
+                result['success'] = len(test_cases) > 0
+                
+                # Create summary
+                total_inputs = len(test_inputs)
+                successful_cases = len(test_cases)
+                failed_count = len(failed_cases)
+                
+                if successful_cases == total_inputs:
+                    result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
+                elif successful_cases > 0:
+                    result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
+                else:
+                    result['summary'] = f"❌ FAIL - No test cases generated from {total_inputs} inputs"
+                
+                print(f"📊 {result['summary']}")
+                return result
                 
         except TimeoutException:
-            print("❌ Sandbox execution timed out")
-            return []
+            error_msg = "Sandbox execution timed out"
+            result['errors'].append(error_msg)
+            result['summary'] = "❌ FAIL - Sandbox timeout"
+            print(f"❌ {error_msg}")
+            return result
         except Exception as e:
-            print(f"❌ Sandbox error: {e}")
-            return []
+            error_msg = f"Sandbox error: {e}"
+            result['errors'].append(error_msg)
+            result['summary'] = f"❌ FAIL - Sandbox error"
+            print(f"❌ {error_msg}")
+            return result
     
     def _extract_function_name(self, code: str) -> Optional[str]:
         """Extract the main function name from Python code."""
@@ -455,16 +516,19 @@ except Exception as e:
                     "errors": [f"Failed to parse test_cases: {e}"],
                     "gt_summary": "❌ FAIL - Invalid test cases format"
                 })
-            
+
             # Run the ground truth solution through test case generation to verify it works
-            results = self.generate_test_cases(ground_truth, [tc[0] for tc in parsed_test_cases], function_name)
+            test_result = self.generate_test_cases(ground_truth, [tc[0] for tc in parsed_test_cases], function_name)
             
-            if not results:
+            if not test_result['success']:
                 return json.dumps({
                     "passes_check": False,
-                    "errors": ["Could not execute ground truth solution"],
-                    "gt_summary": "❌ FAIL - Ground truth execution failed"
+                    "errors": ["Could not execute ground truth solution"] + test_result['errors'],
+                    "warnings": test_result['warnings'],
+                    "gt_summary": f"❌ FAIL - Ground truth execution failed: {test_result['summary']}"
                 })
+            
+            results = test_result['test_cases']
             
             # Check if the ground truth produces the expected outputs
             errors = []
@@ -483,6 +547,8 @@ except Exception as e:
                 "total_test_cases": len(parsed_test_cases),
                 "successful_cases": len(results),
                 "errors": errors,
+                "warnings": test_result['warnings'],
+                "execution_summary": test_result['summary'],
                 "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} ({len(results)}/{len(parsed_test_cases)} test cases passed)"
             }
             
@@ -505,5 +571,89 @@ except Exception as e:
             return json.dumps({
                 "passes_check": False,
                 "errors": [f"Ground truth check error: {str(e)}"],
+                "gt_summary": f"❌ FAIL - Ground truth check error: {str(e)}"
+            }) 
+
+    
+    def _check_nulls_against_test_cases(self, nulls: str, function_name: str, test_cases: str) -> str:
+        """
+        Check that a null solutions do not pass the verifier
+        """
+        try:
+            import ast
+            import json
+            
+            # Parse test_cases from string to list of tuples
+            try:
+                parsed_test_cases = ast.literal_eval(test_cases)
+            except (ValueError, SyntaxError) as e:
+                return json.dumps({
+                    "passes_check": False,
+                    "errors": [f"Failed to parse test_cases: {e}"],
+                    "gt_summary": "❌ FAIL - Invalid test cases format"
+                })
+            
+            try:
+                parsed_nulls = json.loads(nulls) if nulls else []
+            except (ValueError, TypeError) as e:
+                return json.dumps({
+                    "passes_check": False,
+                    "errors": [f"Failed to parse nulls: {e}"],
+                    "gt_summary": "❌ FAIL - Invalid nulls format"
+                })
+
+            null_passes_check = []
+
+            for null in parsed_nulls:
+                # Run the ground truth solution through test case generation to verify it works
+                test_result = self.generate_test_cases(null, [tc[0] for tc in parsed_test_cases], function_name)
+                
+                if not test_result['success']:
+                    # Nulls ought to fail
+                    null_passes_check.append(True)
+                    continue
+                
+                results = test_result['test_cases']
+            
+                errors = []
+                for i, (expected_input, expected_output) in enumerate(parsed_test_cases):
+                    if i < len(results):
+                        actual_input, actual_output = results[i]
+                        if actual_output != expected_output:
+                            errors.append(f"Test case {i+1}: expected {expected_output}, got {actual_output}")
+                    else:
+                        errors.append(f"Test case {i+1}: no output generated")
+            
+                null_passes_check.append(len(errors) != 0)
+
+            passes_check = all(null_passes_check)
+
+            gt_data = {
+                "passes_check": passes_check,
+                "total_test_cases": len(parsed_test_cases),
+                "successful_cases": len(results),
+                "errors": errors,
+                "warnings": test_result['warnings'],
+                "execution_summary": test_result['summary'],
+                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} (Null failing at least one test case (all should fail): {null_passes_check})"
+            }
+            
+            # Log the ground truth check results
+            logger.info(f"Nulls check completed - Passes: {passes_check}")
+            if passes_check:
+                logger.info("✅ Null solutions correctly do not pass the verifier")
+            else:
+                logger.info("❌ Null solutions validation issues:")
+                for i, null_pass in enumerate(null_passes_check[:3], 1):  # Log first 3 errors
+                    if not null_pass:
+                        logger.info(f"  {i}. Null solution passed all test cases (should fail at least one)")
+            
+            return json.dumps(gt_data, indent=2)
+            
+        except Exception as e:
+            logger.error(f"❌ Null check failed: {str(e)}")
+            return json.dumps({
+                "passes_check": False,
+                "errors": [f"Null check error: {str(e)}"],
                 "gt_summary": f"❌ FAIL - Ground truth check error: {str(e)}"
             }) 

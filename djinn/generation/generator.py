@@ -70,6 +70,7 @@ class ProblemGenerator:
             max_tokens=32768
         )
         dspy.configure(lm=lm)
+        self.lm = lm
     
     def _run_final_validation_and_alignment_check(self, result, exploit_description: str) -> Dict[str, Any]:
         """
@@ -194,9 +195,10 @@ class ProblemGenerator:
         """
                 
         # Run the three-stage generation pipeline
-        result = self.pipeline.generate_complete_problem(
-            exploit_description=exploit_description
-        )
+        with dspy.context(lm=self.lm):
+            result = self.pipeline.generate_complete_problem(
+                exploit_description=exploit_description
+            )
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")
@@ -282,12 +284,13 @@ class ProblemGenerator:
         """
                 
         # Use the three-stage pipeline but provide reference materials
-        result = self.pipeline.generate_complete_problem(
-            exploit_description=exploit_description,
-            reference_description=problem_description,
-            reference_ground_truth=ground_truth_solution,
-            reference_test_cases=test_cases
-        )
+        with dspy.context(lm=self.lm):
+            result = self.pipeline.generate_complete_problem(
+                exploit_description=exploit_description,
+                reference_description=problem_description,
+                reference_ground_truth=ground_truth_solution,
+                reference_test_cases=test_cases
+            )
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")
