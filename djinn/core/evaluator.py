@@ -166,7 +166,7 @@ class ProblemEvaluator:
     
     def _setup_model(self, model_name: str) -> dspy.LM:
         """Setup DSPy with specific OpenRouter model"""
-        max_tokens = 32768/2  # default
+        max_tokens = 32768  # default
 
             
         return dspy.LM(

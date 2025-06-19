@@ -19,7 +19,7 @@ class ProblemGenerator:
     """Main class for automated problem generation using DSPy and OpenRouter."""
     
     @classmethod
-    def create_evaluation_optimized(cls, model: str = "openrouter/anthropic/claude-sonnet-4", 
+    def create_evaluation_optimized(cls, model: str = "openrouter/openai/o3", 
                                    api_key: Optional[str] = None):
         """
         Factory method to create a generator optimized for evaluation metrics.
@@ -27,7 +27,7 @@ class ProblemGenerator:
         """
         return cls(model=model, api_key=api_key, enable_evaluation=True)
     
-    def __init__(self, model: str = "openrouter/anthropic/claude-sonnet-4", api_key: Optional[str] = None, 
+    def __init__(self, model: str = "openrouter/openai/o3", api_key: Optional[str] = None, 
                  enable_evaluation: bool = False):
         """
         Initialize the problem generator.
