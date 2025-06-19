@@ -353,7 +353,7 @@ def handle_dataset_import(args, generator):
             if result.get("success", False):
                 # Generate LLM-based directory name
                 try:
-                    llm_name = generator.generate_directory_name(result["problem_dict"])
+                    llm_name = generator.generate_directory_name(result["problem_dict"], args.out)
                     problem_name = f"{llm_name}_{i:03d}"
                 except Exception as e:
                     print(f"⚠️  Failed to generate LLM name for sample {i}: {e}")

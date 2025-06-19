@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import dspy
 from datasets import load_dataset
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .modules import ThreeStageGenerationPipeline
 from .verifier import verify_problem_consistency
 from .generator_utils import TestCaseGenerator
@@ -422,60 +423,88 @@ class ProblemGenerator:
         print(f"💾 Problem saved to {output_path}")
         print(f"   - problem.yaml: {len(json.dumps(problem_yaml))} characters")
     
-    def generate_directory_name(self, problem_dict: Dict[str, Any]) -> str:
+    def generate_directory_name(self, problem_dict: Dict[str, Any], base_path: str) -> str:
         """
-        Generate a concise, descriptive directory name for a problem using LLM.
+        Generate a unique, concise, descriptive directory name for a problem using LLM.
         
         Args:
             problem_dict: The problem dictionary
+            base_path: The base directory path where this directory will be created
             
         Returns:
-            A filesystem-safe directory name (e.g., "buffer_overflow_string_concat")
+            A filesystem-safe directory name that doesn't already exist in base_path
         """
+        from pathlib import Path
+        import re
         
-        # Create a concise prompt for directory naming
+        base_path = Path(base_path)
+        
+        # Create a concise prompt for directory naming that considers both description and exploit
+        problem_desc = problem_dict.get('description', '')[:300]
+        exploit_explanation = problem_dict.get('exploit_explanation', '')[:300]
+        
         prompt = f"""Generate a concise, descriptive directory name for this coding problem. The name should be:
 - 2-4 words maximum
 - Use underscores instead of spaces
 - Be filesystem-safe (no special characters)
-- Capture the key vulnerability/concept
+- Capture both the main problem concept AND the vulnerability type
 
-Problem description: {problem_dict.get('description', '')[:200]}...
-Exploit explanation: {problem_dict.get('exploit_explanation', '')[:200]}...
+Problem description: {problem_desc}...
+Vulnerability/exploit: {exploit_explanation}...
+
+Examples of good names: "string_buffer_overflow", "sql_injection_login", "path_traversal_file_access"
 
 Respond with just the directory name, nothing else."""
 
-        try:
-            # Use the configured LM to generate the name
-            import dspy
-            response = dspy.Predict("question -> answer")(question=prompt)
-            
-            # Clean up the response and make it filesystem-safe
-            name = response.answer.strip().lower()
+        def clean_name(raw_name: str) -> str:
+            """Clean and sanitize a directory name."""
+            name = raw_name.strip().lower()
             # Remove any quotes or extra text
             name = name.replace('"', '').replace("'", '')
             # Keep only alphanumeric, underscores, and hyphens
-            import re
             name = re.sub(r'[^a-z0-9_-]', '_', name)
             # Remove multiple consecutive underscores
             name = re.sub(r'_+', '_', name)
             # Remove leading/trailing underscores
             name = name.strip('_')
+            return name
+
+        def generate_fallback_name() -> str:
+            """Generate a fallback name from problem description."""
+            # Use first few words of problem description
+            desc_words = problem_dict.get('description', 'generated problem').split()[:3]
+            fallback = '_'.join(desc_words).lower()
+            return clean_name(fallback) or 'generated_problem'
+
+        # Try to generate name with LLM
+        try:
+            import dspy
+            response = dspy.Predict("question -> answer")(question=prompt)
+            base_name = clean_name(response.answer)
             
             # Fallback if name is too short or empty
-            if len(name) < 3:
+            if len(base_name) < 3:
                 raise ValueError("Generated name too short")
                 
-            return name
-            
         except Exception as e:
-            # Fallback to sanitized problem description if LLM fails
             print(f"⚠️  LLM name generation failed ({e}), using fallback")
-            fallback = problem_dict.get('description', 'generated_problem')[:50]
-            import re
-            fallback = re.sub(r'[^a-zA-Z0-9_-]', '_', fallback.lower())
-            fallback = re.sub(r'_+', '_', fallback).strip('_')
-            return fallback or 'generated_problem'
+            base_name = generate_fallback_name()
+
+        # Ensure uniqueness by checking if directory exists
+        unique_name = base_name
+        counter = 1
+        
+        while (base_path / unique_name).exists():
+            unique_name = f"{base_name}_{counter}"
+            counter += 1
+            
+            # Safety check to avoid infinite loop
+            if counter > 100:
+                import time
+                unique_name = f"{base_name}_{int(time.time())}"
+                break
+                
+        return unique_name
     
     def save_optimized_generator(self, name: str, save_dir: str = "optimized_generators", 
                                 description: str = ""):
@@ -691,14 +720,16 @@ Respond with just the directory name, nothing else."""
                 "error": error_msg
             }
 
-    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True) -> List[Dict[str, Any]]:
+    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
+                         max_workers: int = 3) -> List[Dict[str, Any]]:
         """
-        Sample and import multiple problems from the PrimeIntellect dataset.
+        Sample and import multiple problems from the PrimeIntellect dataset in parallel.
         
         Args:
             exploit_description: Description of the vulnerability to introduce (required)
             n: Number of problems to sample and import
             filter_with_ground_truth: Only sample problems that have ground truth solutions
+            max_workers: Maximum number of parallel import jobs (default: 3)
             
         Returns:
             List of import results
@@ -709,31 +740,63 @@ Respond with just the directory name, nothing else."""
         
         print(f"🎲 Sampling {n} problems from PrimeIntellect dataset...")
         print(f"   Filter for ground truth: {'Yes' if filter_with_ground_truth else 'No'}")
+        print(f"   Max parallel workers: {max_workers}")
         print(f"🎯 Exploit type: {exploit_description}")
         
         try:
             samples = self._sample_problems(n=n, filter_with_ground_truth=filter_with_ground_truth)
             print(f"📋 Found {len(samples)} problems to import")
             
-            results = []
-            for i, row in enumerate(samples):
-                print(f"\n{'='*60}")
-                print(f"IMPORTING PROBLEM {i+1}/{len(samples)}")
-                print(f"{'='*60}")
+            # Submit all import jobs to thread pool
+            results = [None] * len(samples)  # Pre-allocate results list to maintain order
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all jobs and keep track of their futures with indices
+                future_to_index = {}
+                for i, row in enumerate(samples):
+                    future = executor.submit(
+                        self.import_from_prime_intellect,
+                        row=row,
+                        exploit_description=exploit_description
+                    )
+                    future_to_index[future] = i
                 
-                result = self.import_from_prime_intellect(
-                    row=row, 
-                    exploit_description=exploit_description
-                )
-                results.append(result)
+                print(f"🚀 Started {len(samples)} import jobs in parallel...")
                 
-                if result["success"]:
-                    print(f"✅ Problem {i+1}/{len(samples)} imported successfully!")
-                else:
-                    print(f"❌ Problem {i+1}/{len(samples)} failed to import: {result.get('error', 'Unknown error')}")
+                # Process completed jobs as they finish
+                completed_count = 0
+                for future in as_completed(future_to_index.keys()):
+                    completed_count += 1
+                    index = future_to_index[future]
+                    
+                    try:
+                        result = future.result()
+                        results[index] = result
+                        
+                        print(f"\n{'='*60}")
+                        if result["success"]:
+                            print(f"✅ Problem {completed_count}/{len(samples)} imported successfully!")
+                            if result.get("source_metadata", {}).get("original_problem_id"):
+                                print(f"   ID: {result['source_metadata']['original_problem_id']}")
+                        else:
+                            print(f"❌ Problem {completed_count}/{len(samples)} failed to import:")
+                            print(f"   Error: {result.get('error', 'Unknown error')}")
+                        print(f"{'='*60}")
+                        
+                    except Exception as e:
+                        # Handle exceptions that occurred during import
+                        error_result = {
+                            "success": False,
+                            "error": f"Import job failed with exception: {str(e)}"
+                        }
+                        results[index] = error_result
+                        print(f"\n{'='*60}")
+                        print(f"❌ Problem {completed_count}/{len(samples)} failed with exception:")
+                        print(f"   Error: {str(e)}")
+                        print(f"{'='*60}")
             
             # Summary
-            successful = sum(1 for r in results if r["success"])
+            successful = sum(1 for r in results if r and r["success"])
             print(f"\n{'='*60}")
             print(f"IMPORT SUMMARY")
             print(f"{'='*60}")
