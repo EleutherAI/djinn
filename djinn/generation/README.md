@@ -140,7 +140,7 @@ The generation system consists of several components:
 
 - `DraftProblem`: Generates problem assets from exploit description
 - `ValidateProblem`: Validates generated problems using sandbox execution
-- `ProblemGenerationPipeline`: Complete end-to-end pipeline
+- `ThreeStageGenerationPipeline`: Complete end-to-end pipeline
 
 ### 3. Main Generator (`generator.py`)
 

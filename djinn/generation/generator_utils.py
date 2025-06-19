@@ -61,6 +61,13 @@ class TestCaseGenerator:
             desc="Check whether an exploit properly targets the specific vulnerability in an insecure verifier and analyze alignment quality"
         )
         
+        # Add ground truth checking tool (different from full problem consistency)
+        self.check_gt_tool = dspy.Tool(
+            self._check_ground_truth,
+            name="check_ground_truth",
+            desc="Check that a ground truth solution correctly implements the required function and passes test cases"
+        )
+        
         # List of all tools for easy access
         self.tools = [
             self.random_integers_tool,
@@ -68,6 +75,24 @@ class TestCaseGenerator:
             self.random_lists_tool,
             self.edge_integers_tool,
             self.edge_strings_tool,
+            self.validation_tool,
+            self.alignment_tool,
+            self.check_gt_tool
+        ]
+        
+        # Stage-specific tool lists
+        self.stage1_tools = []  # No tools needed for ChainOfThought description generation
+        
+        self.stage2_tools = [  # Test generation + GT validation
+            self.random_integers_tool,
+            self.random_strings_tool,
+            self.random_lists_tool,
+            self.edge_integers_tool,
+            self.edge_strings_tool,
+            self.check_gt_tool
+        ]
+        
+        self.stage3_tools = [  # Validation and alignment
             self.validation_tool,
             self.alignment_tool
         ]
@@ -403,4 +428,82 @@ except Exception as e:
                 "passes_check": False,
                 "error": f"Alignment check error: {str(e)}",
                 "alignment_summary": f"❌ FAIL - Alignment check error: {str(e)}"
+            })
+    
+    def _check_ground_truth(self, ground_truth: str, function_name: str, test_cases: str) -> str:
+        """
+        Check that a ground truth solution correctly implements the required function and passes test cases.
+        
+        Args:
+            ground_truth: Ground truth solution code
+            function_name: Name of the function to test
+            test_cases: Test cases as string representation of list of tuples
+            
+        Returns:
+            JSON string containing validation results
+        """
+        try:
+            import ast
+            import json
+            
+            # Parse test_cases from string to list of tuples
+            try:
+                parsed_test_cases = ast.literal_eval(test_cases)
+            except (ValueError, SyntaxError) as e:
+                return json.dumps({
+                    "passes_check": False,
+                    "errors": [f"Failed to parse test_cases: {e}"],
+                    "gt_summary": "❌ FAIL - Invalid test cases format"
+                })
+            
+            # Run the ground truth solution through test case generation to verify it works
+            results = self.generate_test_cases(ground_truth, [tc[0] for tc in parsed_test_cases], function_name)
+            
+            if not results:
+                return json.dumps({
+                    "passes_check": False,
+                    "errors": ["Could not execute ground truth solution"],
+                    "gt_summary": "❌ FAIL - Ground truth execution failed"
+                })
+            
+            # Check if the ground truth produces the expected outputs
+            errors = []
+            for i, (expected_input, expected_output) in enumerate(parsed_test_cases):
+                if i < len(results):
+                    actual_input, actual_output = results[i]
+                    if actual_output != expected_output:
+                        errors.append(f"Test case {i+1}: expected {expected_output}, got {actual_output}")
+                else:
+                    errors.append(f"Test case {i+1}: no output generated")
+            
+            passes_check = len(errors) == 0
+            
+            gt_data = {
+                "passes_check": passes_check,
+                "total_test_cases": len(parsed_test_cases),
+                "successful_cases": len(results),
+                "errors": errors,
+                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} ({len(results)}/{len(parsed_test_cases)} test cases passed)"
+            }
+            
+            # Log the ground truth check results
+            logger.info(f"Ground truth check completed - Passes: {passes_check}")
+            logger.info(f"Test cases: {len(results)}/{len(parsed_test_cases)} passed")
+            if passes_check:
+                logger.info("✅ Ground truth correctly implements the required function")
+            else:
+                logger.info("❌ Ground truth validation issues:")
+                for i, error in enumerate(errors[:3], 1):  # Log first 3 errors
+                    logger.info(f"  {i}. {error}")
+                if len(errors) > 3:
+                    logger.info(f"  ... and {len(errors) - 3} more errors")
+            
+            return json.dumps(gt_data, indent=2)
+            
+        except Exception as e:
+            logger.error(f"❌ Ground truth check failed: {str(e)}")
+            return json.dumps({
+                "passes_check": False,
+                "errors": [f"Ground truth check error: {str(e)}"],
+                "gt_summary": f"❌ FAIL - Ground truth check error: {str(e)}"
             }) 

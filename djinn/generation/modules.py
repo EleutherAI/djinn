@@ -8,108 +8,162 @@ import ast
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from ..core.problem import Problem
-from .signatures import GenerateProblem, GenerateFromComponents
+from .signatures import GenerateProblemDescription, GenerateGroundTruthAndTests, GenerateVulnerabilityComponents
 
 
-class ProblemGenerationPipeline(dspy.Module):
-    """Main pipeline for generating security-focused programming problems."""
+# === THREE-STAGE GENERATION PIPELINE ===
+
+class ThreeStageGenerationPipeline(dspy.Module):
+    """Three-stage pipeline for generating security-focused programming problems."""
     
-    def __init__(self, tools: List[dspy.Tool] = None):
+    def __init__(self):
         super().__init__()
-        self.tools = tools or []
         
-        # Initialize different modules for different generation scenarios
-        if self.tools:
-            # Tool-enabled generation with ReAct
-            self.full_generator = dspy.ReAct(GenerateProblem, tools=self.tools, max_iters=10)
-            self.component_generator = dspy.ReAct(GenerateFromComponents, tools=self.tools, max_iters=10) 
-        else:
-            # Fallback to ChainOfThought if no tools provided
-            self.full_generator = dspy.ChainOfThought(GenerateProblem)
-            self.component_generator = dspy.ChainOfThought(GenerateFromComponents)
+        # Initialize TestCaseGenerator for tools
+        from .generator_utils import TestCaseGenerator
+        self.test_generator = TestCaseGenerator()
         
-    def compile_with_examples(self):
-        """Compile the pipeline with few-shot examples using LabeledFewShot optimizer."""
-        from dspy.teleprompt import LabeledFewShot
-        few_shot_examples = _load_few_shot_examples()
+        # Stage 1: Problem Description Generation (ChainOfThought - no tools needed)
+        self.description_generator = dspy.ChainOfThought(GenerateProblemDescription)
         
-        if few_shot_examples:
-            # Use LabeledFewShot to incorporate our comprehensive examples
-            teleprompter = LabeledFewShot(k=len(few_shot_examples))
-            
-            # Compile each generator with examples
-            self.full_generator = teleprompter.compile(
-                student=self.full_generator,
-                trainset=few_shot_examples
-            )
-            
-            # Create component-based examples for the component generator
-            component_examples = []
-            for example in few_shot_examples:
-                component_example = dspy.Example(
-                    exploit_description=example.exploit_description,
-                    problem_description=example.description,
-                    ground_truth_solution=example.ground_truth,
-                    description=example.description,
-                    function_name=example.function_name,
-                    ground_truth=example.ground_truth,
-                    exploit=example.exploit,
-                    insecure_verifier=example.insecure_verifier,
-                    insecure_verifier_info=example.insecure_verifier_info,
-                    exploit_explanation=example.exploit_explanation,
-                    test_cases=example.test_cases,
-                    nulls=example.nulls,
-                    labels=example.labels,
-                    info_leak_method=example.info_leak_method
-                )
-                component_examples.append(component_example)
-            
-            self.component_generator = teleprompter.compile(
-                student=self.component_generator,
-                trainset=component_examples
-            )
+        # Stage 2: Ground Truth and Test Generation (ReAct with test generation tools)
+        self.ground_truth_generator = dspy.ReAct(
+            GenerateGroundTruthAndTests, 
+            tools=self.test_generator.stage2_tools, 
+            max_iters=10
+        )
         
-        return self
+        # Stage 3: Vulnerability Component Generation (ReAct with validation tools)
+        self.vulnerability_generator = dspy.ReAct(
+            GenerateVulnerabilityComponents, 
+            tools=self.test_generator.stage3_tools, 
+            max_iters=10
+        )
     
-    def forward(self, exploit_description: str, problem_description: str = "", 
-                ground_truth_solution: str = "", test_cases: str = "") -> dspy.Prediction:
+    def generate_stage1(self, reference_description: str = "") -> dspy.Prediction:
         """
-        Generate a complete problem, choosing the appropriate signature based on inputs.
+        Stage 1: Generate problem description and function name.
         
         Args:
-            exploit_description: Description of the exploit to implement
-            problem_description: Existing problem description (optional)
-            ground_truth_solution: Existing ground truth solution (optional)
-            test_cases: Existing test cases (optional)
+            reference_description: Optional existing description to adapt
+            
+        Returns:
+            dspy.Prediction with description and function_name
+        """
+        print("🔄 Stage 1: Generating problem description and function name")
+        result = self.description_generator(reference_description=reference_description)
+        print(f"✅ Generated function: {result.function_name}")
+        return result
+    
+    def generate_stage2(self, description: str, function_name: str, 
+                       reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
+        """
+        Stage 2: Generate ground truth solution, test cases, and null solutions.
+        
+        Args:
+            description: Problem description from Stage 1
+            function_name: Function name from Stage 1
+            reference_ground_truth: Optional existing ground truth to adapt
+            reference_test_cases: Optional existing test cases to adapt
+            
+        Returns:
+            dspy.Prediction with ground_truth, test_cases, and nulls
+        """
+        print("🔄 Stage 2: Generating ground truth, test cases, and null solutions")
+        result = self.ground_truth_generator(
+            description=description,
+            function_name=function_name,
+            reference_ground_truth=reference_ground_truth,
+            reference_test_cases=reference_test_cases
+        )
+        print("✅ Generated ground truth and test cases")
+        return self._clean_code_fields(result)
+    
+    def generate_stage3(self, description: str, function_name: str, ground_truth: str, 
+                       test_cases: str, exploit_description: str) -> dspy.Prediction:
+        """
+        Stage 3: Generate vulnerability components.
+        
+        Args:
+            description: Problem description from Stage 1
+            function_name: Function name from Stage 1
+            ground_truth: Ground truth solution from Stage 2
+            test_cases: Test cases from Stage 2
+            exploit_description: Description of exploit to generate
+            
+        Returns:
+            dspy.Prediction with vulnerability components
+        """
+        print("🔄 Stage 3: Generating vulnerability components")
+        result = self.vulnerability_generator(
+            description=description,
+            function_name=function_name,
+            ground_truth=ground_truth,
+            test_cases=test_cases,
+            exploit_description=exploit_description
+        )
+        print("✅ Generated vulnerability components")
+        return self._clean_code_fields(result)
+    
+    def generate_complete_problem(self, exploit_description: str, reference_description: str = "",
+                                reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
+        """
+        Generate a complete problem using all three stages.
+        
+        Args:
+            exploit_description: Description of exploit to generate
+            reference_description: Optional existing description to adapt
+            reference_ground_truth: Optional existing ground truth to adapt
+            reference_test_cases: Optional existing test cases to adapt
+            
         Returns:
             dspy.Prediction with all problem components
         """
+        print("🚀 Starting three-stage problem generation")
         
-        # Determine which generator to use based on provided inputs
-        if not problem_description and not ground_truth_solution:
-            # Full generation from scratch
-            print(f"🔄 Using full generation mode")
-            result = self.full_generator(exploit_description=exploit_description)
-            return self._clean_code_fields(result)
+        # Stage 1: Generate description and function name
+        stage1_result = self.generate_stage1(reference_description=reference_description)
+        
+        # Stage 2: Generate ground truth and tests
+        stage2_result = self.generate_stage2(
+            description=stage1_result.description,
+            function_name=stage1_result.function_name,
+            reference_ground_truth=reference_ground_truth,
+            reference_test_cases=reference_test_cases
+        )
+        
+        # Stage 3: Generate vulnerability components
+        stage3_result = self.generate_stage3(
+            description=stage1_result.description,
+            function_name=stage1_result.function_name,
+            ground_truth=stage2_result.ground_truth,
+            test_cases=stage2_result.test_cases,
+            exploit_description=exploit_description
+        )
+        
+        # Combine all results
+        complete_result = dspy.Prediction(
+            # From Stage 1
+            description=stage1_result.description,
+            function_name=stage1_result.function_name,
             
-        else:
-            # Generate from problem description only
-            if problem_description and ground_truth_solution:
-                provided = "problem description and ground truth solution"
-            elif problem_description:
-                provided = "problem description"
-            else:
-                provided = "ground truth solution"
-            print(f"🔄 Using component generation mode ({provided} provided)")
-            result = self.component_generator(
-                exploit_description=exploit_description,
-                problem_description=problem_description,
-                ground_truth_solution=ground_truth_solution,
-                test_cases=test_cases
-            )
-
-            return self._clean_code_fields(result)
-       
+            # From Stage 2
+            ground_truth=stage2_result.ground_truth,
+            test_cases=stage2_result.test_cases,
+            nulls=stage2_result.nulls,
+            
+            # From Stage 3
+            exploit=stage3_result.exploit,
+            insecure_verifier=stage3_result.insecure_verifier,
+            insecure_verifier_info=stage3_result.insecure_verifier_info,
+            exploit_explanation=stage3_result.exploit_explanation,
+            info_leak_method=stage3_result.info_leak_method,
+            labels=stage3_result.labels
+        )
+        
+        print("🎉 Complete problem generation finished")
+        return complete_result
+    
     def _clean_code_fields(self, result: dspy.Prediction) -> dspy.Prediction:
         """Clean code fields in the prediction result by removing markdown guards."""
         code_fields = [
@@ -136,42 +190,6 @@ class ProblemGenerationPipeline(dspy.Module):
                 
         return result
     
-    def _extract_function_name(self, problem_description: str, ground_truth_solution: str) -> str:
-        """Extract function name from problem description or ground truth code."""
-        
-        # Try to extract from problem description first
-        import re
-        
-        # Look for function name patterns in problem description
-        patterns = [
-            r'implement\s+(?:a\s+)?(?:function\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)\(`?',
-            r'function\s+called\s+`?([a-zA-Z_][a-zA-Z0-9_]*)\(`?',
-            r'write\s+(?:a\s+)?(?:function\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)\(`?',
-            r'create\s+(?:a\s+)?(?:function\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)\(`?',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, problem_description, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
-        # If not found in description, try to extract from ground truth code
-        if ground_truth_solution:
-            def_match = re.search(r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', ground_truth_solution)
-            if def_match:
-                return def_match.group(1)
-        
-        # Fallback to generic name
-        return "solve_problem"
-    
-    def _parse_test_cases(self, test_cases_str: str) -> List[tuple]:
-        """Parse test cases from string format to list of tuples."""
-        try:
-            # Use ast.literal_eval for safe evaluation of Python literals
-            return ast.literal_eval(test_cases_str)
-        except (ValueError, SyntaxError):
-            return []
-
     def _extract_code_from_guards(self, code_str: str) -> str:
         """
         Extract code from markdown code blocks if present, otherwise return as-is.
@@ -208,66 +226,103 @@ class ProblemGenerationPipeline(dspy.Module):
         
         return code_str
 
-def _load_few_shot_examples():
-    """Load few-shot examples from YAML file."""
-    current_dir = Path(__file__).parent
-    yaml_path = current_dir / "few_shot_examples.yaml"
+
+# === INDIVIDUAL STAGE MODULES ===
+
+class ProblemDescriptionGenerator(dspy.Module):
+    """Stage 1: Generate clear problem descriptions with specific function requirements."""
     
-    try:
-        with yaml_path.open('r') as f:
-            data = yaml.safe_load(f)
+    def __init__(self):
+        super().__init__()
+        self.generator = dspy.ChainOfThought(GenerateProblemDescription)
+    
+    def forward(self, reference_description: str = "") -> dspy.Prediction:
+        """Generate problem description and function name."""
+        return self.generator(reference_description=reference_description)
+
+
+class GroundTruthAndTestGenerator(dspy.Module):
+    """Stage 2: Generate ground truth solutions, test cases, and null solutions."""
+    
+    def __init__(self):
+        super().__init__()
+        from .generator_utils import TestCaseGenerator
+        self.test_generator = TestCaseGenerator()
+        self.generator = dspy.ReAct(
+            GenerateGroundTruthAndTests, 
+            tools=self.test_generator.stage2_tools, 
+            max_iters=10
+        )
+    
+    def forward(self, description: str, function_name: str, 
+                reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
+        """Generate ground truth, test cases, and null solutions."""
+        result = self.generator(
+            description=description,
+            function_name=function_name,
+            reference_ground_truth=reference_ground_truth,
+            reference_test_cases=reference_test_cases
+        )
+        return self._clean_code_fields(result)
+    
+    def _clean_code_fields(self, result: dspy.Prediction) -> dspy.Prediction:
+        """Clean code fields by removing markdown guards."""
+        code_fields = ['ground_truth']
         
-        examples = []
-        for i, example_data in enumerate(data.get('examples', [])):
+        for field in code_fields:
+            if hasattr(result, field) and getattr(result, field):
+                cleaned_code = extract_code_from_guards(getattr(result, field))
+                setattr(result, field, cleaned_code)
+        
+        # Clean nulls
+        if hasattr(result, 'nulls') and result.nulls:
             try:
-                exploit_description = example_data['exploit_description']
-                # Required fields - will raise KeyError if missing
-                description = example_data['description']
-                function_name = example_data['function_name']
-                ground_truth = example_data['ground_truth']
-                exploit = example_data['exploit']
-                insecure_verifier = example_data['insecure_verifier']
-                exploit_explanation = example_data['exploit_explanation']
-                test_cases = example_data['test_cases']
+                import json
+                nulls_list = json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls
+                if isinstance(nulls_list, list):
+                    cleaned_nulls = [extract_code_from_guards(null_code) for null_code in nulls_list]
+                    result.nulls = json.dumps(cleaned_nulls)
+            except (json.JSONDecodeError, TypeError):
+                pass
                 
-                # Optional fields with defaults
-                tools = example_data.get('tools', [])
-                insecure_verifier_info = example_data.get('insecure_verifier_info', '')
-                info_leak_method = example_data.get('info_leak_method', '')
-                
-                # Convert nulls from list to JSON string if it's a list
-                nulls = example_data.get('nulls', [])
-                if isinstance(nulls, list):
-                    nulls = json.dumps(nulls)
-                
-                # Convert labels from list to JSON string if it's a list  
-                labels = example_data.get('labels', [])
-                if isinstance(labels, list):
-                    labels = json.dumps(labels)
-                
-                example = dspy.Example(
-                    exploit_description=exploit_description,
-                    description=description,
-                    function_name=function_name,
-                    ground_truth=ground_truth,
-                    exploit=exploit,
-                    insecure_verifier=insecure_verifier,
-                    insecure_verifier_info=insecure_verifier_info,
-                    exploit_explanation=exploit_explanation,
-                    test_cases=test_cases,
-                    nulls=nulls,
-                    labels=labels,
-                    info_leak_method=info_leak_method
-                )
-                examples.append(example)
-                
-            except KeyError as e:
-                raise KeyError(f"Missing required field {e} in example {i} in few_shot_examples.yaml") from e
+        return result
+
+
+class VulnerabilityComponentGenerator(dspy.Module):
+    """Stage 3: Generate vulnerability components with validation."""
+    
+    def __init__(self):
+        super().__init__()
+        from .generator_utils import TestCaseGenerator
+        self.test_generator = TestCaseGenerator()
+        self.generator = dspy.ReAct(
+            GenerateVulnerabilityComponents, 
+            tools=self.test_generator.stage3_tools, 
+            max_iters=10
+        )
+    
+    def forward(self, description: str, function_name: str, ground_truth: str, 
+                test_cases: str, exploit_description: str) -> dspy.Prediction:
+        """Generate vulnerability components."""
+        result = self.generator(
+            description=description,
+            function_name=function_name,
+            ground_truth=ground_truth,
+            test_cases=test_cases,
+            exploit_description=exploit_description
+        )
+        return self._clean_code_fields(result)
+    
+    def _clean_code_fields(self, result: dspy.Prediction) -> dspy.Prediction:
+        """Clean code fields by removing markdown guards."""
+        code_fields = ['exploit', 'insecure_verifier']
         
-        return examples
-    except Exception as e:
-        print(f"Warning: Could not load few-shot examples from YAML: {e}")
-        return []
+        for field in code_fields:
+            if hasattr(result, field) and getattr(result, field):
+                cleaned_code = extract_code_from_guards(getattr(result, field))
+                setattr(result, field, cleaned_code)
+                
+        return result
 
 
 class ProblemEvaluator(dspy.Module):
@@ -366,4 +421,65 @@ def extract_code_from_guards(code_str: str) -> str:
         
         return '\n'.join(lines)
     
-    return code_str 
+    return code_str
+
+def _load_few_shot_examples():
+    """Load few-shot examples from YAML file."""
+    current_dir = Path(__file__).parent
+    yaml_path = current_dir / "few_shot_examples.yaml"
+    
+    try:
+        with yaml_path.open('r') as f:
+            data = yaml.safe_load(f)
+        
+        examples = []
+        for i, example_data in enumerate(data.get('examples', [])):
+            try:
+                exploit_description = example_data['exploit_description']
+                # Required fields - will raise KeyError if missing
+                description = example_data['description']
+                function_name = example_data['function_name']
+                ground_truth = example_data['ground_truth']
+                exploit = example_data['exploit']
+                insecure_verifier = example_data['insecure_verifier']
+                exploit_explanation = example_data['exploit_explanation']
+                test_cases = example_data['test_cases']
+                
+                # Optional fields with defaults
+                tools = example_data.get('tools', [])
+                insecure_verifier_info = example_data.get('insecure_verifier_info', '')
+                info_leak_method = example_data.get('info_leak_method', '')
+                
+                # Convert nulls from list to JSON string if it's a list
+                nulls = example_data.get('nulls', [])
+                if isinstance(nulls, list):
+                    nulls = json.dumps(nulls)
+                
+                # Convert labels from list to JSON string if it's a list  
+                labels = example_data.get('labels', [])
+                if isinstance(labels, list):
+                    labels = json.dumps(labels)
+                
+                example = dspy.Example(
+                    exploit_description=exploit_description,
+                    description=description,
+                    function_name=function_name,
+                    ground_truth=ground_truth,
+                    exploit=exploit,
+                    insecure_verifier=insecure_verifier,
+                    insecure_verifier_info=insecure_verifier_info,
+                    exploit_explanation=exploit_explanation,
+                    test_cases=test_cases,
+                    nulls=nulls,
+                    labels=labels,
+                    info_leak_method=info_leak_method
+                )
+                examples.append(example)
+                
+            except KeyError as e:
+                raise KeyError(f"Missing required field {e} in example {i} in few_shot_examples.yaml") from e
+        
+        return examples
+    except Exception as e:
+        print(f"Warning: Could not load few-shot examples from YAML: {e}")
+        return []

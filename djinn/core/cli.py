@@ -236,9 +236,7 @@ def handle_generate(args):
             return handle_single_generate(args, generator)
             
     except ImportError as e:
-        print(f"Error: Problem generation requires additional dependencies: {e}")
-        print("Please install: pip install dspy-ai openai")
-        exit(1)
+        raise e
     except Exception as e:
         import traceback
         print(f"Error during problem generation: {e}")

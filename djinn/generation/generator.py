@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import dspy
 from datasets import load_dataset
-from .modules import ProblemGenerationPipeline
+from .modules import ThreeStageGenerationPipeline
 from .verifier import verify_problem_consistency
 from .generator_utils import TestCaseGenerator
 from ..core.problem import Problem
@@ -46,11 +46,8 @@ class ProblemGenerator:
         # Configure DSPy with OpenRouter
         self._setup_dspy()
         
-        # Initialize test case generator with DSPy tools
-        self.test_case_generator = TestCaseGenerator()
-        
-        # Initialize the generation pipeline with tools
-        self.pipeline = ProblemGenerationPipeline(tools=self.test_case_generator.tools).compile_with_examples()
+        # Initialize the three-stage generation pipeline (tools are hardcoded internally)
+        self.pipeline = ThreeStageGenerationPipeline()
         
         # Initialize evaluator if needed
         if self.enable_evaluation:
@@ -112,7 +109,8 @@ class ProblemGenerator:
         
         # 1. Final validation check using the validation tool
         try:
-            validation_result_str = self.test_case_generator._validate_problem_consistency(
+            test_generator = TestCaseGenerator()
+            validation_result_str = test_generator._validate_problem_consistency(
                 ground_truth=ground_truth,
                 exploit=exploit,
                 function_name=function_name,
@@ -144,7 +142,7 @@ class ProblemGenerator:
         
         # 2. Final alignment check using the alignment tool
         try:
-            alignment_result_str = self.test_case_generator._check_vulnerability_alignment(
+            alignment_result_str = test_generator._check_vulnerability_alignment(
                 exploit_code=exploit,
                 insecure_verifier_code=insecure_verifier,
                 exploit_description=exploit_description
@@ -189,14 +187,13 @@ class ProblemGenerator:
         
         Args:
             exploit_description: Free-text description of the exploit to implement
-            max_attempts: Maximum number of generation attempts
             
         Returns:
             Dictionary containing the generated problem and metadata
         """
                 
-        # Run the generation pipeline with failure feedback (full generation mode)
-        result = self.pipeline(
+        # Run the three-stage generation pipeline
+        result = self.pipeline.generate_complete_problem(
             exploit_description=exploit_description
         )
         
@@ -269,24 +266,26 @@ class ProblemGenerator:
             }
     
     def generate_from_components(self, exploit_description: str, problem_description: str = "", 
-                                ground_truth_solution: str = "") -> Dict[str, Any]:
+                                ground_truth_solution: str = "", test_cases: str = "") -> Dict[str, Any]:
         """
-        Generate verifiers and exploits from existing problem components (unified import-style generation).
+        Generate verifiers and exploits from existing problem components.
         
         Args:
             exploit_description: Description of the vulnerability to introduce
             problem_description: Existing problem description (if available)
             ground_truth_solution: Existing ground truth solution (if available)
+            test_cases: Existing test cases (if available)
             
         Returns:
             Dictionary containing the generated problem and metadata
         """
                 
-        # Run the generation pipeline in import mode (with failure feedback handled internally)
-        result = self.pipeline(
+        # Use the three-stage pipeline but provide reference materials
+        result = self.pipeline.generate_complete_problem(
             exploit_description=exploit_description,
-            problem_description=problem_description,
-            ground_truth_solution=ground_truth_solution
+            reference_description=problem_description,
+            reference_ground_truth=ground_truth_solution,
+            reference_test_cases=test_cases
         )
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
@@ -361,103 +360,16 @@ class ProblemGenerator:
         """
         Optimize the generation pipeline using DSPy optimizers.
         
+        Note: Optimization with the three-stage pipeline is currently not fully supported.
+        The new modular architecture makes optimization more complex as each stage
+        has different tools and objectives.
+        
         Args:
             training_examples: List of exploit descriptions with expected outcomes
             optimizer_type: Type of optimizer to use ('bootstrap' or 'mipro')
         """
         
-        def validation_metric(gold, pred, trace=None):
-            """
-            Enhanced metric function for DSPy optimization based on evaluation criteria.
-            Optimizes for:
-            - Basic consistency (40%): GT passes both verifiers, exploit passes insecure only, nulls fail
-            - Problem quality (24%): Higher is better  
-            - Exploit fairness (24%): Higher is better
-            - Inverted exploit finding appearance (12%): Lower is better - want problems to look normal
-            """
-            if not isinstance(pred, dict) or not pred.get("success", False):
-                return 0.0
-            
-            # Get the problem instance for consistency checks
-            problem = pred.get("problem")
-            if not problem:
-                return 0.0
-            
-            score = 0.0
-            weights = {
-                "quality": 0.4,       # Problem specification quality
-                "fairness": 0.4,      # Exploit fairness
-                "appearance": 0.2     # Normal appearance
-            }
-                        
-            # 1. Run detailed evaluation if evaluator is available and not already done
-            eval_result = pred.get("evaluation_result")
-            if not eval_result and self.enable_evaluation and hasattr(self, 'evaluator'):
-                try:
-                    print(f"🔍 Running detailed evaluation for optimization...")
-                    eval_result = self.evaluator.evaluate_problem(problem, quick=True)  # Use quick mode during optimization
-                    # Store the result for potential reuse
-                    pred["evaluation_result"] = eval_result
-                except Exception as e:
-                    print(f"⚠️  Evaluation failed during optimization: {e}")
-                    eval_result = None
-            
-            # 2. Apply evaluation-based metrics (if available)
-            if eval_result:
-                # Problem quality score (0-1, scaled from 1-10)
-                if eval_result.problem_quality is not None:
-                    quality_score = (eval_result.problem_quality - 1) / 9  # Scale 1-10 to 0-1
-                    score += weights["quality"] * max(0, min(1, quality_score))
-                    print(f"   📊 Problem Quality: {eval_result.problem_quality:.1f}/10 (contributes {weights['quality'] * quality_score:.3f})")
-                
-                # Exploit fairness score (0-1, scaled from 1-10)
-                if eval_result.exploit_fairness is not None:
-                    fairness_score = (eval_result.exploit_fairness - 1) / 9  # Scale 1-10 to 0-1
-                    score += weights["fairness"] * max(0, min(1, fairness_score))
-                    print(f"   🤝 Exploit Fairness: {eval_result.exploit_fairness:.1f}/10 (contributes {weights['fairness'] * fairness_score:.3f})")
-                
-                # Inverted exploit finding appearance (0-1, inverted so lower appearance is better)
-                if eval_result.exploit_finding_appearance is not None:
-                    # Invert: 1.0 - appearance gives us higher score for problems that look normal
-                    appearance_score = 1.0 - eval_result.exploit_finding_appearance
-                    score += weights["appearance"] * max(0, min(1, appearance_score))
-                    print(f"   🎭 Normal Appearance: {appearance_score:.2f}/1.0 (contributes {weights['appearance'] * appearance_score:.3f})")
-                    
-                print(f"   🏆 Total Evaluation Score: {score:.3f}")
-            else:
-                # If no evaluation available, give partial credit for non-consistency metrics
-                # This ensures that basic working problems still get reasonable scores
-                partial_credit = (weights["quality"] + weights["fairness"] + weights["appearance"]) * 0.5
-                score += partial_credit
-                print(f"   ⚠️  No evaluation available, giving partial credit: +{partial_credit:.3f}")
-                print(f"   🏆 Total Score (consistency + partial): {score:.3f}")
-            
-            return score
-        
-        if not self.enable_evaluation:
-            print("⚠️  Warning: Evaluation is disabled. Optimizer will use basic success metric.")
-            print("   Enable evaluation for quality-based optimization.")
-        
-        # Prepare training data
-        trainset = []
-        for example in training_examples:
-            trainset.append(dspy.Example(
-                exploit_description=example["exploit_description"]
-            ).with_inputs("exploit_description"))
-        
-        # Choose optimizer
-        if optimizer_type == "bootstrap":
-            optimizer = dspy.BootstrapFewShot(metric=validation_metric, max_bootstrapped_demos=4)
-        elif optimizer_type == "mipro":
-            optimizer = dspy.MIPROv2(metric=validation_metric, num_candidates=10)
-        else:
-            raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
-        
-        # Optimize the pipeline
-        print(f"🔧 Optimizing pipeline with {len(trainset)} examples using {optimizer_type}...")
-        print(f"📊 Optimization metric: Basic Consistency (40%) + Problem Quality (24%) + Exploit Fairness (24%) + Normal Appearance (12%)")
-        self.pipeline = optimizer.compile(self.pipeline, trainset=trainset)
-        print("✅ Pipeline optimization complete!")
+        raise NotImplementedError("Pipeline optimization is not supported with the three-stage pipeline")
     
     def save_problem(self, problem_dict: Dict[str, Any], output_dir: str, problem_obj: Optional[Problem] = None):
         """
@@ -568,68 +480,24 @@ Respond with just the directory name, nothing else."""
     def save_optimized_generator(self, name: str, save_dir: str = "optimized_generators", 
                                 description: str = ""):
         """
-        Save the optimized generator pipeline with a descriptive name.
+        Save the current generator configuration (note: optimization not fully supported in three-stage pipeline).
         
         Args:
-            name: Unique name for this optimized generator (e.g., "web_vulns", "crypto_exploits")
+            name: Unique name for this generator configuration
             save_dir: Directory to save generators (default: "optimized_generators")
-            description: Optional description of what this generator is optimized for
+            description: Optional description of what this generator is configured for
         """
-        save_path = Path(save_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
-        
-        # Create metadata file
-        metadata = {
-            "name": name,
-            "description": description,
-            "model": self.model,
-            "enable_evaluation": self.enable_evaluation,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        
-        # Save the optimized pipeline
-        pipeline_path = save_path / f"{name}_pipeline.json"
-        metadata_path = save_path / f"{name}_metadata.json"
-        
-        self.pipeline.save(str(pipeline_path))
-        
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"💾 Saved optimized generator '{name}' to {save_path}")
-        print(f"   - Pipeline: {pipeline_path}")
-        print(f"   - Metadata: {metadata_path}")
+        raise NotImplementedError("Saving optimized generators is not supported with the three-stage pipeline")
     
     def load_optimized_generator(self, name: str, save_dir: str = "optimized_generators"):
         """
-        Load a previously saved optimized generator.
+        Load a previously saved generator configuration.
         
         Args:
             name: Name of the saved generator
             save_dir: Directory where generators are saved
         """
-        save_path = Path(save_dir)
-        pipeline_path = save_path / f"{name}_pipeline.json"
-        metadata_path = save_path / f"{name}_metadata.json"
-        
-        if not pipeline_path.exists():
-            raise FileNotFoundError(f"Optimized generator '{name}' not found at {pipeline_path}")
-        
-        # Load metadata
-        if metadata_path.exists():
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-            print(f"📂 Loading optimized generator '{name}':")
-            print(f"   Description: {metadata.get('description', 'No description')}")
-            print(f"   Model: {metadata.get('model', 'Unknown')}")
-            print(f"   Created: {metadata.get('created_at', 'Unknown')}")
-        
-        # Load the pipeline
-        from .modules import ProblemGenerationPipeline
-        self.pipeline = ProblemGenerationPipeline(tools=self.tools)
-        self.pipeline.load(str(pipeline_path))
-        
-        print(f"✅ Loaded optimized generator '{name}' successfully!")
+        raise NotImplementedError("Loading optimized generators is not supported with the three-stage pipeline")
     
     def _load_dataset(self, split: str = "train", streaming: bool = False):
         """Load the PrimeIntellect dataset."""
@@ -681,31 +549,14 @@ Respond with just the directory name, nothing else."""
     def from_saved_generator(cls, name: str, save_dir: str = "optimized_generators", 
                            api_key: Optional[str] = None):
         """
-        Create a generator instance from a saved optimized generator.
+        Create a generator instance from a saved generator configuration.
         
         Args:
-            name: Name of the saved generator
+            name: Name of the saved generator configuration
             save_dir: Directory where generators are saved
             api_key: OpenRouter API key (optional, uses env var if not provided)
         """
-        # Load metadata to get original settings
-        save_path = Path(save_dir)
-        metadata_path = save_path / f"{name}_metadata.json"
-        
-        if metadata_path.exists():
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-            model = metadata.get("model", "openrouter/anthropic/claude-sonnet-4")
-            enable_evaluation = metadata.get("enable_evaluation", False)
-        else:
-            model = "openrouter/anthropic/claude-sonnet-4"
-            enable_evaluation = False
-        
-        # Create generator and load optimized pipeline
-        generator = cls(model=model, api_key=api_key, enable_evaluation=enable_evaluation)
-        generator.load_optimized_generator(name, save_dir)
-        
-        return generator
+        raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
     @staticmethod
     def list_saved_generators(save_dir: str = "optimized_generators") -> List[Dict[str, Any]]:
@@ -718,20 +569,7 @@ Respond with just the directory name, nothing else."""
         Returns:
             List of generator metadata dictionaries
         """
-        save_path = Path(save_dir)
-        if not save_path.exists():
-            return []
-        
-        generators = []
-        for metadata_file in save_path.glob("*_metadata.json"):
-            try:
-                with open(metadata_file, "r") as f:
-                    metadata = json.load(f)
-                generators.append(metadata)
-            except Exception as e:
-                print(f"Warning: Could not load metadata from {metadata_file}: {e}")
-        
-        return generators
+        raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
     def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
                                   exploit_description: str = "", 
@@ -770,8 +608,9 @@ Respond with just the directory name, nothing else."""
                 print(f"   Original ID: {row['problem_id']}")
             
             prompt = row.get("prompt", "")
+            test_cases = ""
             ground_truth = row.get("gold_standard_solution", "")
-            test_cases = row.get("verification_info", "")
+            # test_cases = self._parse_primeintellect_verification_info(row.get("verification_info", ""))
             
             if not prompt:
                 return {
@@ -790,6 +629,7 @@ Respond with just the directory name, nothing else."""
             ])) or 'None - will generate all'
             print(f"🔧 Provided components: {provided_components}")
             
+
             # Use the unified pipeline to generate missing components
             result = self.generate_from_components(
                 exploit_description=exploit_description,
@@ -850,7 +690,7 @@ Respond with just the directory name, nothing else."""
                 "success": False,
                 "error": error_msg
             }
-    
+
     def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True) -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the PrimeIntellect dataset.
