@@ -11,7 +11,7 @@ from dataclasses import asdict
 from e2b import Sandbox
 from e2b.exceptions import TimeoutException
 
-from djinn.core.sandbox_defs import VerificationStatus, VerificationResult
+from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
 
 # Path constants
 SANDBOX_RUNNER_PATH = Path(__file__).parent / "runner.py"
@@ -30,30 +30,20 @@ class SandboxVerificationService:
         if not self.api_key:
             raise ValueError("E2B_API_KEY environment variable is required for sandbox verification")
     
-    def verify_single(self, problem, submission_code: str) -> VerificationResult:
+    def verify_single(self, problem, submission_code: str, secure: bool) -> VerificationResultSingle:
         """
-        Verify a single submission against a problem using both secure and insecure verifiers.
-        
-        Args:
-            problem: Problem instance with verifiers and test cases
-            submission_code: Code to verify
-            
-        Returns:
-            VerificationResult with both secure and insecure verification results
+        Verify a single submission against a problem using the secure verifier.
         """
         try:
             with Sandbox() as sandbox:
-                # Upload insecure verifier and submission
-                sandbox.files.write("/home/user/_insecure_verifier.py", problem.insecure_verifier.encode())
                 sandbox.files.write("/home/user/submission.py", submission_code.encode())
                 
-                # Upload the standalone secure verifier
-                secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
-                sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
-                
-                # Create a secure verifier script that uses the standalone verifier
                 normalized_test_cases = problem._normalize_test_cases()
-                secure_verifier_script = f'''
+                
+                if secure:
+                    secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
+                    sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
+                    secure_verifier_script = f'''
 from secure_verifier import verify as verify_function
 
 def verify(submission_code: str):
@@ -63,9 +53,12 @@ def verify(submission_code: str):
         function_name="{problem.function_name}",
         test_cases={normalized_test_cases!r}
     )
-'''
-                sandbox.files.write("/home/user/_secure_verifier.py", secure_verifier_script.encode())
-                
+                '''
+                    sandbox.files.write("/home/user/_verifier.py", secure_verifier_script.encode())
+
+                else:
+                    sandbox.files.write("/home/user/_verifier.py", problem.insecure_verifier.encode())
+
                 # Upload runner and definitions
                 runner_code = SANDBOX_RUNNER_PATH.read_text()
                 sandbox.files.write("/home/user/_runner.py", runner_code.encode())
@@ -79,38 +72,30 @@ def verify(submission_code: str):
                 if result.exit_code != 0:
                     # Combine stdout and stderr for more complete feedback on failure
                     feedback = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
-                    return VerificationResult(
-                        secure_status=VerificationStatus.CRASHED,
-                        insecure_status=VerificationStatus.CRASHED,
-                        secure_feedback=feedback,
-                        insecure_feedback=feedback
+                    return VerificationResultSingle(
+                        status=VerificationStatus.CRASHED,
+                        feedback=feedback
                     )
 
-                # Parse the result from stdout
                 result_json = json.loads(result.stdout)
-                return VerificationResult(
-                    secure_status=VerificationStatus(result_json["secure_status"]),
-                    insecure_status=VerificationStatus(result_json["insecure_status"]),
-                    secure_feedback=result_json.get("secure_feedback"),
-                    insecure_feedback=result_json.get("insecure_feedback")
+                return VerificationResultSingle(
+                    status=VerificationStatus(result_json["status"]),
+                    feedback=result_json.get("feedback")
                 )
         except TimeoutException:
-            return VerificationResult(
-                secure_status=VerificationStatus.TIMED_OUT,
-                insecure_status=VerificationStatus.TIMED_OUT,
-                secure_feedback="Sandbox execution timed out after 10 seconds.",
-                insecure_feedback="Sandbox execution timed out after 10 seconds."
+            return VerificationResultSingle(
+                status=VerificationStatus.TIMED_OUT,
+                feedback="Sandbox execution timed out after 10 seconds."
             )
         except Exception as e:
             # This catches errors with the sandbox itself (e.g., connection issues)
             feedback = f"Sandbox execution failed: {e}"
-            return VerificationResult(
-                secure_status=VerificationStatus.CRASHED,
-                insecure_status=VerificationStatus.CRASHED,
-                secure_feedback=feedback,
-                insecure_feedback=feedback
+            return VerificationResultSingle(
+                status=VerificationStatus.CRASHED,
+                feedback=feedback
             )
-    
+
+
     def verify_problem_consistency(self, problem) -> Dict[str, Any]:
         """
         Comprehensive verification of problem consistency.
@@ -134,61 +119,64 @@ def verify(submission_code: str):
         
         try:
             # Test ground truth - should pass both verifiers
-            gt_result = self.verify_single(problem, problem.ground_truth)
+            gt_secure_result = self.verify_single(problem, problem.ground_truth, secure=True)
+            gt_insecure_result = self.verify_single(problem, problem.ground_truth, secure=False)
             results["ground_truth_secure"] = {
-                "status": gt_result.secure_status.value,
-                "feedback": gt_result.secure_feedback
+                "status": gt_secure_result.status.value,
+                "feedback": gt_secure_result.feedback
             }
             results["ground_truth_insecure"] = {
-                "status": gt_result.insecure_status.value,
-                "feedback": gt_result.insecure_feedback
+                "status": gt_insecure_result.status.value,
+                "feedback": gt_insecure_result.feedback
             }
             
-            if gt_result.secure_status != VerificationStatus.PASSED:
-                results["errors"].append(f"Ground truth failed secure verifier: {gt_result.secure_feedback}")
+            if gt_secure_result.status != VerificationStatus.PASSED:
+                results["errors"].append(f"Ground truth failed secure verifier: {gt_secure_result.feedback}")
                 results["is_consistent"] = False
-            if gt_result.insecure_status != VerificationStatus.PASSED:
-                results["errors"].append(f"Ground truth failed insecure verifier: {gt_result.insecure_feedback}")
+            if gt_insecure_result.status != VerificationStatus.PASSED:
+                results["errors"].append(f"Ground truth failed insecure verifier: {gt_insecure_result.feedback}")
                 results["is_consistent"] = False
             
             # Test exploit - should fail secure but pass insecure with expected status
-            exploit_result = self.verify_single(problem, problem.exploit)
+            exploit_secure_result = self.verify_single(problem, problem.exploit, secure=True)
+            exploit_insecure_result = self.verify_single(problem, problem.exploit, secure=False)
             results["exploit_secure"] = {
-                "status": exploit_result.secure_status.value,
-                "feedback": exploit_result.secure_feedback
+                "status": exploit_secure_result.status.value,
+                "feedback": exploit_secure_result.feedback
             }
             results["exploit_insecure"] = {
-                "status": exploit_result.insecure_status.value,
-                "feedback": exploit_result.insecure_feedback
+                "status": exploit_insecure_result.status.value,
+                "feedback": exploit_insecure_result.feedback
             }
             
             expected_insecure_status = VerificationStatus(problem.exploit_expected_status)
-            if exploit_result.secure_status == VerificationStatus.PASSED:
-                results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_result.secure_feedback}")
+            if exploit_secure_result.status == VerificationStatus.PASSED:
+                results["errors"].append(f"Exploit unexpectedly passed secure verifier: {exploit_secure_result.feedback}")
                 results["is_consistent"] = False
-            if exploit_result.insecure_status != expected_insecure_status:
-                results["errors"].append(f"Exploit insecure status mismatch: expected {expected_insecure_status.value}, got {exploit_result.insecure_status.value}")
+            if exploit_insecure_result.status != expected_insecure_status:
+                results["errors"].append(f"Exploit insecure status mismatch: expected {expected_insecure_status.value}, got {exploit_insecure_result.status.value}")
                 results["is_consistent"] = False
             
             # Test nulls - should fail both verifiers
             for i, null_code in enumerate(problem.nulls):
-                null_result = self.verify_single(problem, null_code)
+                null_result_secure = self.verify_single(problem, null_code, secure=True)
+                null_result_insecure = self.verify_single(problem, null_code, secure=False)
                 
                 null_result_dict = {
                     "secure": {
-                        "status": null_result.secure_status.value,
-                        "feedback": null_result.secure_feedback
+                        "status": null_result_secure.status.value,
+                        "feedback": null_result_secure.feedback
                     },
                     "insecure": {
-                        "status": null_result.insecure_status.value,
-                        "feedback": null_result.insecure_feedback
+                        "status": null_result_insecure.status.value,
+                        "feedback": null_result_insecure.feedback
                     },
                     "passes_consistency": True
                 }
                 
                 # Check if null fails both verifiers (as expected)
-                if (null_result.secure_status == VerificationStatus.PASSED or 
-                    null_result.insecure_status == VerificationStatus.PASSED):
+                if (null_result_secure.status == VerificationStatus.PASSED or 
+                    null_result_insecure.status == VerificationStatus.PASSED):
                     results["errors"].append(f"Null {i+1} unexpectedly passed a verifier")
                     null_result_dict["passes_consistency"] = False
                     results["is_consistent"] = False

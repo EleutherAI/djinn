@@ -5,8 +5,11 @@ import json
 import yaml
 import os
 import ast
+import io
+import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+from datetime import datetime
 from ..core.problem import Problem
 from .signatures import GenerateProblemDescription, GenerateGroundTruthAndTests, GenerateVulnerabilityComponents
 
@@ -39,6 +42,46 @@ class ThreeStageGenerationPipeline(dspy.Module):
             tools=self.test_generator.stage3_tools, 
             max_iters=10
         )
+        
+        # Create logs directory
+        self.logs_dir = Path("stage_logs")
+        self.logs_dir.mkdir(exist_ok=True)
+        
+        # Generate timestamp for this run
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    def _capture_inspect_history(self, module, n_steps: int = 5) -> str:
+        """Capture the output of inspect_history() method."""
+        # Redirect stdout to capture the printed output
+        old_stdout = sys.stdout
+        sys.stdout = captured_output = io.StringIO()
+        
+        try:
+            # Call inspect_history which prints to stdout
+            module.inspect_history(n_steps)
+            # Get the captured output
+            history = captured_output.getvalue()
+        finally:
+            # Always restore stdout
+            sys.stdout = old_stdout
+        
+        return history
+    
+    def _log_stage_result(self, stage_name: str, history: str, inputs: Dict[str, Any] = None):
+        """Log stage result to file."""
+        log_data = {
+            "timestamp": datetime.now().isoformat(),
+            "stage": stage_name,
+            "inputs": inputs or {},
+            "history": history
+        }
+        
+        # Write to log file
+        log_file = self.logs_dir / f"{self.run_timestamp}_{stage_name}.json"
+        with log_file.open('w') as f:
+            json.dump(log_data, f, indent=2)
+        
+        print(f"📝 Logged {stage_name} results to {log_file}")
     
     def generate_stage1(self, reference_description: str = "") -> dspy.Prediction:
         """
@@ -53,6 +96,11 @@ class ThreeStageGenerationPipeline(dspy.Module):
         print("🔄 Stage 1: Generating problem description and function name")
         result = self.description_generator(reference_description=reference_description)
         print(f"✅ Generated function: {result.function_name}")
+        
+        # Log stage 1 results
+        history = self._capture_inspect_history(self.description_generator, 5)
+        self._log_stage_result("stage1", history, {"reference_description": reference_description})
+        
         return result
     
     def generate_stage2(self, description: str, function_name: str, 
@@ -77,7 +125,18 @@ class ThreeStageGenerationPipeline(dspy.Module):
             reference_test_cases=reference_test_cases
         )
         print("✅ Generated ground truth and test cases")
-        return self._clean_code_fields(result)
+        
+        # Clean and log stage 2 results
+        cleaned_result = self._clean_code_fields(result)
+        history = self._capture_inspect_history(self.ground_truth_generator, 5)
+        self._log_stage_result("stage2", history, {
+            "description": description,
+            "function_name": function_name,
+            "reference_ground_truth": reference_ground_truth,
+            "reference_test_cases": reference_test_cases
+        })
+        
+        return cleaned_result
     
     def generate_stage3(self, description: str, function_name: str, ground_truth: str, 
                        test_cases: str, exploit_description: str) -> dspy.Prediction:
@@ -103,7 +162,19 @@ class ThreeStageGenerationPipeline(dspy.Module):
             exploit_description=exploit_description
         )
         print("✅ Generated vulnerability components")
-        return self._clean_code_fields(result)
+        
+        # Clean and log stage 3 results
+        cleaned_result = self._clean_code_fields(result)
+        history = self._capture_inspect_history(self.vulnerability_generator, 5)
+        self._log_stage_result("stage3", history, {
+            "description": description,
+            "function_name": function_name,
+            "ground_truth": ground_truth,
+            "test_cases": test_cases,
+            "exploit_description": exploit_description
+        })
+        
+        return cleaned_result
     
     def generate_complete_problem(self, exploit_description: str, reference_description: str = "",
                                 reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
@@ -160,6 +231,15 @@ class ThreeStageGenerationPipeline(dspy.Module):
             info_leak_method=stage3_result.info_leak_method,
             labels=stage3_result.labels
         )
+        
+        # Log final complete result
+        history = self._capture_inspect_history(self.vulnerability_generator, 5)
+        self._log_stage_result("complete", history, {
+            "exploit_description": exploit_description,
+            "reference_description": reference_description,
+            "reference_ground_truth": reference_ground_truth,
+            "reference_test_cases": reference_test_cases
+        })
         
         print("🎉 Complete problem generation finished")
         return complete_result

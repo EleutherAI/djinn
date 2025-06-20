@@ -71,3 +71,6 @@ dataset.jsonl
 # Store the generated dataset elsewhere
 problems/*
 generated_problems/*
+*.ipynb
+stage_logs/*
+notebooks/*

@@ -15,3 +15,8 @@ class VerificationResult:
     insecure_status: VerificationStatus
     secure_feedback: Optional[str] = None 
     insecure_feedback: Optional[str] = None 
+
+@dataclass
+class VerificationResultSingle:
+    status: VerificationStatus
+    feedback: Optional[str] = None

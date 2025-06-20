@@ -1,7 +1,7 @@
 """Standardized secure verifier generation for consistent problem evaluation."""
 
 from typing import List, Tuple, Dict, Any, Optional
-from djinn.core.sandbox_defs import VerificationStatus
+from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
 
 def verify_problem_consistency(ground_truth: str, exploit: str, function_name: str, 
                              test_cases: List[tuple], insecure_verifier: str, 
@@ -42,6 +42,49 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
     
     return service.verify_problem_consistency(temp_problem)
 
+def verify_gt_secure(ground_truth: str, function_name: str, test_cases: List[tuple]) -> VerificationResultSingle:
+    """
+    Verify the ground truth solution using the secure verifier.
+    """
+    from djinn.sandbox.verification_service import get_verification_service
+    service = get_verification_service()
+
+    class TempProblem:
+        def __init__(self):
+            self.ground_truth = ground_truth
+            self.function_name = function_name
+            self.test_cases = test_cases
+        
+        def _normalize_test_cases(self):
+            return self.test_cases if self.test_cases else []
+
+    return service.verify_single(TempProblem(), ground_truth, secure=True)
+
+def verify_nulls_secure(nulls: List[str], function_name: str, test_cases: List[tuple]) -> VerificationResultSingle:
+    """
+    Verify the nulls using the secure verifier.
+    """
+    from djinn.sandbox.verification_service import get_verification_service
+    service = get_verification_service()
+    
+    class TempProblem:
+        def __init__(self):
+            self.nulls = nulls
+            self.function_name = function_name
+            self.test_cases = test_cases
+        
+        def _normalize_test_cases(self):
+            return self.test_cases if self.test_cases else []
+
+    status = VerificationStatus.PASSED
+    feedback = ""
+
+    for i, null in enumerate(nulls):
+        result = service.verify_single(TempProblem(), null, secure=True)
+        if result.status == VerificationStatus.PASSED:
+            status = VerificationStatus.FAILED
+            feedback += f"\nnull {i} unexpectedly passed secure verifier"
+    return VerificationResultSingle(status=status, feedback=feedback)
 
 def get_consistency_summary(verification_results: Dict[str, Any]) -> str:
     """

@@ -203,10 +203,11 @@ class ProblemEvaluator:
             # Test if the solution works by running it through verifier
             from djinn.sandbox.verification_service import get_verification_service
             service = get_verification_service()
-            result = service.verify_single(problem, clean_solution_code)
+            result_secure = service.verify_single(problem, clean_solution_code, secure=True)
+            result_insecure = service.verify_single(problem, clean_solution_code, secure=False)
             
-            success = result.secure_status.value == "passed" and result.insecure_status.value == "passed"
-            feedback = f"{result.secure_status.value}/{result.insecure_status.value}: {result.secure_feedback} {result.insecure_feedback}"
+            success = result_secure.status.value == "passed" and result_insecure.status.value == "passed"
+            feedback = f"{result_secure.status.value}/{result_insecure.status.value}: {result_secure.feedback} {result_insecure.feedback}"
             
             return model_name, success, feedback
                         
@@ -275,12 +276,13 @@ class ProblemEvaluator:
             # Test if the exploit works
             from djinn.sandbox.verification_service import get_verification_service
             service = get_verification_service()
-            result = service.verify_single(problem, clean_exploit_code)
+            result_secure = service.verify_single(problem, clean_exploit_code, secure=True)
+            result_insecure = service.verify_single(problem, clean_exploit_code, secure=False)
             
             expected_status = problem.exploit_expected_status
-            success = (result.secure_status.value != "passed" and 
-                      result.insecure_status.value == expected_status)
-            feedback = f"{result.secure_status.value}/{result.insecure_status.value}: {result.secure_feedback} {result.insecure_feedback}"
+            success = (result_secure.status.value != "passed" and 
+                      result_insecure.status.value == expected_status)
+            feedback = f"{result_secure.status.value}/{result_insecure.status.value}: {result_secure.feedback} {result_insecure.feedback}"
             
             return model_name, success, feedback
                         

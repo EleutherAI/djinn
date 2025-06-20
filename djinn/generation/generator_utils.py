@@ -9,6 +9,7 @@ from e2b import Sandbox
 from e2b.exceptions import TimeoutException
 import json
 import logging
+from djinn.core.sandbox_defs import VerificationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,12 @@ class TestCaseGenerator:
             name="check_nulls",
             desc="Check that a null solutions do not pass the verifier"
         )
+
+        self.generate_test_cases_tool = dspy.Tool(
+            self.generate_test_cases,
+            name="generate_test_cases",
+            desc="Generate test cases for a given function"
+        )
         
         # List of all tools for easy access
         self.tools = [
@@ -95,7 +102,9 @@ class TestCaseGenerator:
             self.random_lists_tool,
             self.edge_integers_tool,
             self.edge_strings_tool,
-            self.check_gt_tool
+            self.check_gt_tool,
+            self.generate_test_cases_tool,
+            self.check_nulls_tool
         ]
         
         self.stage3_tools = [  # Validation and alignment
@@ -517,44 +526,15 @@ except Exception as e:
                     "gt_summary": "❌ FAIL - Invalid test cases format"
                 })
 
-            # Run the ground truth solution through test case generation to verify it works
-            test_result = self.generate_test_cases(ground_truth, [tc[0] for tc in parsed_test_cases], function_name)
-            
-            if not test_result['success']:
-                return json.dumps({
-                    "passes_check": False,
-                    "errors": ["Could not execute ground truth solution"] + test_result['errors'],
-                    "warnings": test_result['warnings'],
-                    "gt_summary": f"❌ FAIL - Ground truth execution failed: {test_result['summary']}"
-                })
-            
-            results = test_result['test_cases']
-            
-            # Check if the ground truth produces the expected outputs
-            errors = []
-            for i, (expected_input, expected_output) in enumerate(parsed_test_cases):
-                if i < len(results):
-                    actual_input, actual_output = results[i]
-                    if actual_output != expected_output:
-                        errors.append(f"Test case {i+1}: expected {expected_output}, got {actual_output}")
-                else:
-                    errors.append(f"Test case {i+1}: no output generated")
-            
-            passes_check = len(errors) == 0
-            
-            gt_data = {
-                "passes_check": passes_check,
-                "total_test_cases": len(parsed_test_cases),
-                "successful_cases": len(results),
-                "errors": errors,
-                "warnings": test_result['warnings'],
-                "execution_summary": test_result['summary'],
-                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} ({len(results)}/{len(parsed_test_cases)} test cases passed)"
-            }
-            
+            from .verifier import verify_gt_secure
+            test_result = verify_gt_secure(ground_truth, function_name, parsed_test_cases)  
+
+            passes_check = test_result.status == VerificationStatus.PASSED
+            errors = test_result.feedback.split("\n")
+
             # Log the ground truth check results
             logger.info(f"Ground truth check completed - Passes: {passes_check}")
-            logger.info(f"Test cases: {len(results)}/{len(parsed_test_cases)} passed")
+            logger.info(f"Feedback: {test_result.feedback}")
             if passes_check:
                 logger.info("✅ Ground truth correctly implements the required function")
             else:
@@ -564,7 +544,11 @@ except Exception as e:
                 if len(errors) > 3:
                     logger.info(f"  ... and {len(errors) - 3} more errors")
             
-            return json.dumps(gt_data, indent=2)
+            return json.dumps({
+                "passes_check": passes_check,
+                "errors": errors,
+                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} ({len(errors)} errors)"
+            }, indent=2)
             
         except Exception as e:
             logger.error(f"❌ Ground truth check failed: {str(e)}")
@@ -602,40 +586,16 @@ except Exception as e:
                     "gt_summary": "❌ FAIL - Invalid nulls format"
                 })
 
-            null_passes_check = []
-
-            for null in parsed_nulls:
-                # Run the ground truth solution through test case generation to verify it works
-                test_result = self.generate_test_cases(null, [tc[0] for tc in parsed_test_cases], function_name)
-                
-                if not test_result['success']:
-                    # Nulls ought to fail
-                    null_passes_check.append(True)
-                    continue
-                
-                results = test_result['test_cases']
-            
-                errors = []
-                for i, (expected_input, expected_output) in enumerate(parsed_test_cases):
-                    if i < len(results):
-                        actual_input, actual_output = results[i]
-                        if actual_output != expected_output:
-                            errors.append(f"Test case {i+1}: expected {expected_output}, got {actual_output}")
-                    else:
-                        errors.append(f"Test case {i+1}: no output generated")
-            
-                null_passes_check.append(len(errors) != 0)
-
-            passes_check = all(null_passes_check)
+            from .verifier import verify_nulls_secure
+            test_result = verify_nulls_secure(parsed_nulls, function_name, parsed_test_cases)
+            passes_check = test_result.status == VerificationStatus.PASSED
+            errors = test_result.feedback.split("\n")
 
             gt_data = {
                 "passes_check": passes_check,
                 "total_test_cases": len(parsed_test_cases),
-                "successful_cases": len(results),
                 "errors": errors,
-                "warnings": test_result['warnings'],
-                "execution_summary": test_result['summary'],
-                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'} (Null failing at least one test case (all should fail): {null_passes_check})"
+                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'})"
             }
             
             # Log the ground truth check results
@@ -644,9 +604,10 @@ except Exception as e:
                 logger.info("✅ Null solutions correctly do not pass the verifier")
             else:
                 logger.info("❌ Null solutions validation issues:")
-                for i, null_pass in enumerate(null_passes_check[:3], 1):  # Log first 3 errors
-                    if not null_pass:
-                        logger.info(f"  {i}. Null solution passed all test cases (should fail at least one)")
+                for i, error in enumerate(errors[:3], 1):  # Log first 3 errors
+                    logger.info(f"  {i}. {error}")
+                if len(errors) > 3:
+                    logger.info(f"  ... and {len(errors) - 3} more errors")
             
             return json.dumps(gt_data, indent=2)
             

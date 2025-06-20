@@ -1,7 +1,7 @@
 import json
 import importlib.util
 from dataclasses import asdict
-from _sandbox_defs import VerificationStatus, VerificationResult
+from _sandbox_defs import VerificationStatus, VerificationResultSingle
 
 def load_verifier(verifier_path: str, module_name: str):
     """Load a verifier module from the given path."""
@@ -26,39 +26,32 @@ def main():
     result = None
     try:
         # Load both verifier modules
-        secure_verifier = load_verifier("/home/user/_secure_verifier.py", "_secure_verifier")
-        insecure_verifier = load_verifier("/home/user/_insecure_verifier.py", "_insecure_verifier")
+        secure_verifier = load_verifier("/home/user/_verifier.py", "_secure_verifier")
 
         # Read the submission code
         with open("/home/user/submission.py", "r") as f:
             submission_code = f.read()
 
         # Run both verifiers
-        secure_status, secure_feedback = run_single_verifier(secure_verifier, submission_code)
-        insecure_status, insecure_feedback = run_single_verifier(insecure_verifier, submission_code)
+        status, feedback = run_single_verifier(secure_verifier, submission_code)
 
-        result = VerificationResult(
-            secure_status=secure_status,
-            insecure_status=insecure_status,
-            secure_feedback=secure_feedback,
-            insecure_feedback=insecure_feedback
+        result = VerificationResultSingle(
+            status=status,
+            feedback=feedback
         )
 
     except Exception as e:
         # If any unexpected error occurs, report it as a crash for both
-        result = VerificationResult(
-            secure_status=VerificationStatus.CRASHED,
-            insecure_status=VerificationStatus.CRASHED,
-            secure_feedback=str(e),
-            insecure_feedback=str(e)
+        result = VerificationResultSingle(
+            status=VerificationStatus.CRASHED,
+            feedback=str(e)
         )
     finally:
         # Serialize the result to JSON and print to stdout
         if result:
             output = asdict(result)
             # Convert enums to their string values for JSON serialization
-            output['secure_status'] = output['secure_status'].value if hasattr(output['secure_status'], 'value') else output['secure_status']
-            output['insecure_status'] = output['insecure_status'].value if hasattr(output['insecure_status'], 'value') else output['insecure_status']
+            output['status'] = output['status'].value if hasattr(output['status'], 'value') else output['status']
             print(json.dumps(output))
 
 if __name__ == "__main__":

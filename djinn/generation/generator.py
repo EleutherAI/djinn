@@ -19,7 +19,7 @@ class ProblemGenerator:
     """Main class for automated problem generation using DSPy and OpenRouter."""
     
     @classmethod
-    def create_evaluation_optimized(cls, model: str = "openrouter/openai/o3", 
+    def create_evaluation_optimized(cls, model: str = "openrouter/anthropic/claude-sonnet-4", 
                                    api_key: Optional[str] = None):
         """
         Factory method to create a generator optimized for evaluation metrics.
@@ -27,7 +27,7 @@ class ProblemGenerator:
         """
         return cls(model=model, api_key=api_key, enable_evaluation=True)
     
-    def __init__(self, model: str = "openrouter/openai/o3", api_key: Optional[str] = None, 
+    def __init__(self, model: str = "openrouter/anthropic/claude-sonnet-4", api_key: Optional[str] = None, 
                  enable_evaluation: bool = False):
         """
         Initialize the problem generator.
@@ -534,7 +534,7 @@ Respond with just the directory name, nothing else."""
     def _load_dataset(self, split: str = "train", streaming: bool = False):
         """Load the PrimeIntellect dataset."""
         try:
-            dataset = load_dataset("PrimeIntellect/verifiable-coding-problems", split=split, streaming=streaming)
+            dataset = load_dataset("open-r1/verifiable-coding-problems-python", split=split, streaming=streaming)
             return dataset
         except Exception as e:
             raise Exception(f"Failed to load dataset: {e}")
@@ -625,103 +625,88 @@ Respond with just the directory name, nothing else."""
         if not exploit_description:
             raise ValueError("exploit_description is required - specify what vulnerability to introduce")
         
-        try:
-            # Get the row to import
-            if row is None:
-                if problem_id is None:
-                    raise ValueError("Either problem_id or row must be provided")
-                print(f"🔍 Looking for problem ID '{problem_id}' in dataset...")
-                row = self._get_problem_by_id(problem_id)
-            
-            print(f"📥 Importing problem from PrimeIntellect dataset...")
-            if row.get("source"):
-                print(f"   Source: {row['source']}")
-            if row.get("problem_id"):
-                print(f"   Original ID: {row['problem_id']}")
-            
-            prompt = row.get("prompt", "")
-            test_cases = ""
-            ground_truth = row.get("gold_standard_solution", "")
-            # test_cases = self._parse_primeintellect_verification_info(row.get("verification_info", ""))
-            
-            if not prompt:
-                return {
-                    "success": False,
-                    "error": "No prompt found in dataset row"
-                }
-            
-            print(f"🔄 Importing problem from dataset...")
-            print(f"📋 Prompt length: {len(prompt)} characters")
-            print(f"💡 Ground truth available: {'Yes' if ground_truth else 'No'}")
-            print(f"🎯 Exploit description: {exploit_description}")
-            provided_components = ', '.join(filter(None, [
-                'exploit' if provided_exploit else '',
-                'insecure_verifier' if provided_insecure_verifier else '',
-                'secure_verifier' if provided_secure_verifier else ''
-            ])) or 'None - will generate all'
-            print(f"🔧 Provided components: {provided_components}")
-            
-
-            # Use the unified pipeline to generate missing components
-            result = self.generate_from_components(
-                exploit_description=exploit_description,
-                problem_description=prompt,
-                ground_truth_solution=ground_truth,
-                test_cases=test_cases
-            )
-            
-            if result["success"]:
-                problem_dict = result["problem_dict"]
-                
-                # Override with provided components if available
-                if provided_exploit:
-                    problem_dict["exploit"] = provided_exploit
-                if provided_insecure_verifier:
-                    problem_dict["insecure_verifier"] = provided_insecure_verifier
-                if provided_secure_verifier:
-                    problem_dict["secure_verifier"] = provided_secure_verifier
-                
-                print("✅ Problem imported successfully!")
-                
-                # Re-validate if we overrode components
-                if provided_exploit or provided_insecure_verifier or provided_secure_verifier:
-                    try:
-                        from ..core.problem import Problem
-                        problem = Problem(**problem_dict)
-                        validation_passed = problem.check_consistency()
-                        if not validation_passed:
-                            print("⚠️  Warning: Validation failed after component override")
-                        result["problem"] = problem
-                        result["problem_dict"] = problem_dict
-                    except Exception as e:
-                        print(f"⚠️  Warning: Re-validation failed: {e}")
-                
-                # Add source metadata
-                result["source_metadata"] = {
-                    "source": row.get("source", "unknown"),
-                    "original_problem_id": row.get("problem_id", "unknown"),
-                    "task_type": row.get("task_type", "unknown"),
-                    "metadata": row.get("metadata", {}),
-                    "exploit_description": exploit_description,
-                    "provided_components": {
-                        "exploit": bool(provided_exploit),
-                        "insecure_verifier": bool(provided_insecure_verifier),
-                        "secure_verifier": bool(provided_secure_verifier)
-                    }
-                }
-                
-                return result
-            else:
-                print(f"❌ Import failed: {result['error']}")
-                return result
-                
-        except Exception as e:
-            error_msg = f"Import failed: {str(e)}"
-            print(f"❌ {error_msg}")
+        print(f"📥 Importing problem from PrimeIntellect dataset...")
+        if row.get("source"):
+            print(f"   Source: {row['source']}")
+        if row.get("problem_id"):
+            print(f"   Original ID: {row['problem_id']}")
+        
+        prompt = row.get("problem_statement", "")
+        test_cases = ""
+        ground_truth = row.get("gold_standard_solution", "")
+        # test_cases = self._parse_primeintellect_verification_info(row.get("verification_info", ""))
+        
+        if not prompt:
             return {
                 "success": False,
-                "error": error_msg
+                "error": "No prompt found in dataset row"
             }
+        
+        print(f"🔄 Importing problem from dataset...")
+        print(f"📋 Prompt length: {len(prompt)} characters")
+        print(f"💡 Ground truth available: {'Yes' if ground_truth else 'No'}")
+        print(f"🎯 Exploit description: {exploit_description}")
+        provided_components = ', '.join(filter(None, [
+            'exploit' if provided_exploit else '',
+            'insecure_verifier' if provided_insecure_verifier else '',
+            'secure_verifier' if provided_secure_verifier else ''
+        ])) or 'None - will generate all'
+        print(f"🔧 Provided components: {provided_components}")
+        
+
+        # Use the unified pipeline to generate missing components
+        result = self.generate_from_components(
+            exploit_description=exploit_description,
+            problem_description=prompt,
+            ground_truth_solution=ground_truth,
+            test_cases=test_cases
+        )
+        
+        if result["success"]:
+            problem_dict = result["problem_dict"]
+            
+            # Override with provided components if available
+            if provided_exploit:
+                problem_dict["exploit"] = provided_exploit
+            if provided_insecure_verifier:
+                problem_dict["insecure_verifier"] = provided_insecure_verifier
+            if provided_secure_verifier:
+                problem_dict["secure_verifier"] = provided_secure_verifier
+            
+            print("✅ Problem imported successfully!")
+            
+            # Re-validate if we overrode components
+            if provided_exploit or provided_insecure_verifier or provided_secure_verifier:
+                try:
+                    from ..core.problem import Problem
+                    problem = Problem(**problem_dict)
+                    validation_passed = problem.check_consistency()
+                    if not validation_passed:
+                        print("⚠️  Warning: Validation failed after component override")
+                    result["problem"] = problem
+                    result["problem_dict"] = problem_dict
+                except Exception as e:
+                    print(f"⚠️  Warning: Re-validation failed: {e}")
+            
+            # Add source metadata
+            result["source_metadata"] = {
+                "source": row.get("source", "unknown"),
+                "original_problem_id": row.get("problem_id", "unknown"),
+                "task_type": row.get("task_type", "unknown"),
+                "metadata": row.get("metadata", {}),
+                "exploit_description": exploit_description,
+                "provided_components": {
+                    "exploit": bool(provided_exploit),
+                    "insecure_verifier": bool(provided_insecure_verifier),
+                    "secure_verifier": bool(provided_secure_verifier)
+                }
+            }
+            
+            return result
+        else:
+            print(f"❌ Import failed: {result['error']}")
+            return result
+                
 
     def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
                          max_workers: int = 3) -> List[Dict[str, Any]]:
@@ -746,73 +731,65 @@ Respond with just the directory name, nothing else."""
         print(f"   Max parallel workers: {max_workers}")
         print(f"🎯 Exploit type: {exploit_description}")
         
-        try:
-            samples = self._sample_problems(n=n, filter_with_ground_truth=filter_with_ground_truth)
-            print(f"📋 Found {len(samples)} problems to import")
+        samples = self._sample_problems(n=n, filter_with_ground_truth=filter_with_ground_truth)
+        print(f"📋 Found {len(samples)} problems to import")
+        
+        # Submit all import jobs to thread pool
+        results = [None] * len(samples)  # Pre-allocate results list to maintain order
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all jobs and keep track of their futures with indices
+            future_to_index = {}
+            for i, row in enumerate(samples):
+                future = executor.submit(
+                    self.import_from_prime_intellect,
+                    row=row,
+                    exploit_description=exploit_description
+                )
+                future_to_index[future] = i
             
-            # Submit all import jobs to thread pool
-            results = [None] * len(samples)  # Pre-allocate results list to maintain order
+            print(f"🚀 Started {len(samples)} import jobs in parallel...")
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all jobs and keep track of their futures with indices
-                future_to_index = {}
-                for i, row in enumerate(samples):
-                    future = executor.submit(
-                        self.import_from_prime_intellect,
-                        row=row,
-                        exploit_description=exploit_description
-                    )
-                    future_to_index[future] = i
+            # Process completed jobs as they finish
+            completed_count = 0
+            for future in as_completed(future_to_index.keys()):
+                completed_count += 1
+                index = future_to_index[future]
                 
-                print(f"🚀 Started {len(samples)} import jobs in parallel...")
-                
-                # Process completed jobs as they finish
-                completed_count = 0
-                for future in as_completed(future_to_index.keys()):
-                    completed_count += 1
-                    index = future_to_index[future]
+                try:
+                    result = future.result()
+                    results[index] = result
                     
-                    try:
-                        result = future.result()
-                        results[index] = result
-                        
-                        print(f"\n{'='*60}")
-                        if result["success"]:
-                            print(f"✅ Problem {completed_count}/{len(samples)} imported successfully!")
-                            if result.get("source_metadata", {}).get("original_problem_id"):
-                                print(f"   ID: {result['source_metadata']['original_problem_id']}")
-                        else:
-                            print(f"❌ Problem {completed_count}/{len(samples)} failed to import:")
-                            print(f"   Error: {result.get('error', 'Unknown error')}")
-                        print(f"{'='*60}")
-                        
-                    except Exception as e:
-                        # Handle exceptions that occurred during import
-                        error_result = {
-                            "success": False,
-                            "error": f"Import job failed with exception: {str(e)}"
-                        }
-                        results[index] = error_result
-                        print(f"\n{'='*60}")
-                        print(f"❌ Problem {completed_count}/{len(samples)} failed with exception:")
-                        print(f"   Error: {str(e)}")
-                        print(f"{'='*60}")
-            
-            # Summary
-            successful = sum(1 for r in results if r and r["success"])
-            print(f"\n{'='*60}")
-            print(f"IMPORT SUMMARY")
-            print(f"{'='*60}")
-            print(f"Total problems: {len(results)}")
-            print(f"Successful imports: {successful}")
-            print(f"Failed imports: {len(results) - successful}")
-            
-            return results
-            
-        except Exception as e:
-            error_msg = f"Sampling and import failed: {str(e)}"
-            print(f"❌ {error_msg}")
-            return [{
-                "success": False,
-                "error": error_msg
-            }] 
+                    print(f"\n{'='*60}")
+                    if result["success"]:
+                        print(f"✅ Problem {completed_count}/{len(samples)} imported successfully!")
+                        if result.get("source_metadata", {}).get("original_problem_id"):
+                            print(f"   ID: {result['source_metadata']['original_problem_id']}")
+                    else:
+                        print(f"❌ Problem {completed_count}/{len(samples)} failed to import:")
+                        print(f"   Error: {result.get('error', 'Unknown error')}")
+                    print(f"{'='*60}")
+                    
+                except Exception as e:
+                    # Handle exceptions that occurred during import
+                    raise e
+                    error_result = {
+                        "success": False,
+                        "error": f"Import job failed with exception: {str(e)}"
+                    }
+                    results[index] = error_result
+                    print(f"\n{'='*60}")
+                    print(f"❌ Problem {completed_count}/{len(samples)} failed with exception:")
+                    print(f"   Error: {str(e)}")
+                    print(f"{'='*60}")
+        
+        # Summary
+        successful = sum(1 for r in results if r and r["success"])
+        print(f"\n{'='*60}")
+        print(f"IMPORT SUMMARY")
+        print(f"{'='*60}")
+        print(f"Total problems: {len(results)}")
+        print(f"Successful imports: {successful}")
+        print(f"Failed imports: {len(results) - successful}")
+        
+        return results
