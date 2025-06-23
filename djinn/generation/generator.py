@@ -13,6 +13,7 @@ from .verifier import verify_problem_consistency
 from .generator_utils import TestCaseGenerator
 from ..core.problem import Problem
 import time
+import random
 
 
 class ProblemGenerator:
@@ -631,10 +632,13 @@ Respond with just the directory name, nothing else."""
         if row.get("problem_id"):
             print(f"   Original ID: {row['problem_id']}")
         
-        prompt = row.get("problem_statement", "")
         test_cases = ""
+        prompt = row.get("problem_statement", "")
         ground_truth = row.get("gold_standard_solution", "")
         # test_cases = self._parse_primeintellect_verification_info(row.get("verification_info", ""))
+        if len(test_cases) > 15:
+            indices = random.sample(range(len(test_cases)), 15)
+            test_cases = [test_cases[i] for i in indices]
         
         if not prompt:
             return {

@@ -13,6 +13,7 @@ import subprocess
 import json
 import tempfile
 import os
+import inspect
 from io import StringIO
 from typing import List, Tuple
 
@@ -114,36 +115,71 @@ def reliability_guard(maximum_memory_bytes=None):
 
 
 def create_subprocess_runner_script():
-    """Create the script that will run in the subprocess to execute user code."""
+    """Create the script that will run in the subprocess to execute user code only."""
     return '''
 import sys
 import json
 import signal
 import time
-import traceback
+import inspect
 from io import StringIO
-import builtins
-
-# Grab pristine functions before executing untrusted code
-real_print = builtins.print
-real_dumps = json.dumps
-real_signal = signal.signal
 
 def timeout_handler(signum, frame):
     raise Exception("TimeoutException")
+
+def call_function_with_appropriate_args(func, test_input):
+    """
+    Call a function with test_input, using function signature inspection
+    to determine the appropriate way to unpack arguments.
+    """
+    try:
+        # Get function signature
+        sig = inspect.signature(func)
+        param_count = len(sig.parameters)
+        
+        # Handle different cases based on parameter count and input type
+        if param_count == 0:
+            # Function takes no arguments
+            return func()
+        elif param_count == 1:
+            # Function takes exactly one argument - pass test_input as-is
+            return func(test_input)
+        else:
+            # Function takes multiple arguments
+            if isinstance(test_input, (tuple, list)):
+                if len(test_input) == param_count:
+                    # Perfect match - unpack the arguments
+                    return func(*test_input)
+                elif len(test_input) == 1:
+                    # Single item in container, but function wants multiple args
+                    # This might be a case where test_input should be passed as-is
+                    return func(test_input)
+                else:
+                    # Mismatch in argument count - try unpacking anyway and let it fail naturally
+                    return func(*test_input)
+            else:
+                # test_input is not a tuple/list but function wants multiple args
+                # This is likely an error case, but pass it as single argument
+                return func(test_input)
+                
+    except (ValueError, TypeError):
+        # If signature inspection fails, fall back to original logic
+        if isinstance(test_input, tuple):
+            return func(*test_input)
+        else:
+            return func(test_input)
 
 def main():
     # Read configuration from stdin
     config = json.loads(input())
     submission_code = config["submission_code"]
     function_name = config["function_name"]
-    test_cases = config["test_cases"]
+    test_input = config["test_input"]
     timeout = config["timeout"]
     
     # Set up timeout
-    real_signal(signal.SIGALRM, timeout_handler)
-    
-    results = []
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
     
     try:
         # Execute submission in clean namespace
@@ -151,7 +187,7 @@ def main():
         exec(submission_code, namespace)
         
         if function_name not in namespace:
-            real_print(real_dumps({
+            print(json.dumps({
                 "error": f"Function '{function_name}' not found in submission"
             }))
             return
@@ -159,65 +195,50 @@ def main():
         submitted_function = namespace[function_name]
         
         if not callable(submitted_function):
-            real_print(real_dumps({
+            print(json.dumps({
                 "error": f"'{function_name}' exists but is not callable"
             }))
             return
         
-        # Run each test case
-        for i, (test_input, expected_output) in enumerate(test_cases):
-            real_signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-            
-            try:
-                # Capture stdout
-                old_stdout = sys.stdout
-                sys.stdout = captured_output = StringIO()
-                
-                start_time = time.time()
-                
-                # Call function
-                if isinstance(test_input, tuple):
-                    actual_output = submitted_function(*test_input)
-                else:
-                    actual_output = submitted_function(test_input)
-                
-                execution_time = time.time() - start_time
-                printed_output = captured_output.getvalue().strip()
-                sys.stdout = old_stdout
-                signal.alarm(0)
-                
-                # Store result
-                results.append({
-                    "test_index": i,
-                    "actual_output": actual_output,
-                    "printed_output": printed_output,
-                    "execution_time": execution_time,
-                    "error": None
-                })
-                
-            except Exception as e:
-                sys.stdout = old_stdout
-                signal.alarm(0)
-                
-                error_msg = str(e)
-                if "timeoutexception" in error_msg.lower():
-                    error_msg = "Time Limit Exceeded"
-                
-                results.append({
-                    "test_index": i,
-                    "actual_output": None,
-                    "printed_output": None,
-                    "execution_time": None,
-                    "error": error_msg
-                })
+        # Capture stdout
+        old_stdout = sys.stdout
+        sys.stdout = captured_output = StringIO()
         
-        real_print(real_dumps({"results": results}))
+        start_time = time.time()
+        
+        # Call function
+        actual_output = call_function_with_appropriate_args(submitted_function, test_input)
+        
+        execution_time = time.time() - start_time
+        printed_output = captured_output.getvalue().strip()
+        sys.stdout = old_stdout
+        
+        # Return result
+        print(json.dumps({
+            "actual_output": actual_output,
+            "printed_output": printed_output,
+            "execution_time": execution_time,
+            "error": None
+        }))
         
     except SyntaxError as e:
-        real_print(real_dumps({"error": f"Syntax error: {str(e)}"}))
+        print(json.dumps({"error": f"Syntax error: {str(e)}"}))
     except Exception as e:
-        real_print(real_dumps({"error": f"Execution error: {str(e)}"}))
+        import traceback
+        error_msg = str(e)
+        if "timeoutexception" in error_msg.lower():
+            error_msg = "Time Limit Exceeded"
+        elif not error_msg or error_msg == "":
+            # Handle case where str(e) returns empty string or None
+            error_msg = f"Unknown error: {type(e).__name__}"
+            
+        # Add detailed error information
+        error_details = {
+            "error": error_msg,
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+        print(json.dumps(error_details))
     finally:
         signal.alarm(0)
 
@@ -227,10 +248,10 @@ if __name__ == "__main__":
 
 
 def verify_function_submission_subprocess(submission_code: str, function_name: str, test_cases: List[tuple], 
-                                        timeout: int = 6, max_memory_gb: int = 4) -> SingleVerificationResult:
+                                        timeout: int = 6, max_memory_gb: int = 4, order_dependent: bool = True) -> SingleVerificationResult:
     """
     Verify a submission using subprocess isolation.
-    This prevents the user code from monkey-patching the verifier.
+    The subprocess only executes user code - all verification logic runs in the main process.
     """
     # Import subprocess before reliability guard potentially disables it
     import subprocess as sp
@@ -242,96 +263,121 @@ def verify_function_submission_subprocess(submission_code: str, function_name: s
             script_path = f.name
         
         try:
-            # Prepare configuration
-            config = {
-                "submission_code": submission_code,
-                "function_name": function_name,
-                "test_cases": test_cases,
-                "timeout": timeout
-            }
-            
-            # Run subprocess with memory limit
-            max_memory_bytes = max_memory_gb * 1024 * 1024 * 1024
-            env = os.environ.copy()
-            env["PYTHONPATH"] = ""  # Clean Python path
-            
-            # Use ulimit to set memory limits (Unix-specific)
-            cmd = f"ulimit -v {max_memory_bytes // 1024}; python {script_path}"
-            
-            process = sp.Popen(
-                ["bash", "-c", cmd],
-                stdin=sp.PIPE,
-                stdout=sp.PIPE,
-                stderr=sp.PIPE,
-                text=True,
-                env=env
-            )
-            
-            # Send config and get results with overall timeout
-            try:
-                stdout, stderr = process.communicate(
-                    input=json.dumps(config),
-                    timeout=timeout * len(test_cases) + 5  # Extra buffer for subprocess overhead
-                )
-            except sp.TimeoutExpired:
-                process.kill()
-                return SingleVerificationResult(
-                    status=VerificationStatus.TIMED_OUT,
-                    feedback="Overall execution timed out"
-                )
-            
-            if process.returncode != 0:
-                return SingleVerificationResult(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Subprocess crashed with return code {process.returncode}. STDERR: {stderr}"
-                )
-            
-            # Parse results
-            try:
-                response = json.loads(stdout)
-            except json.JSONDecodeError:
-                return SingleVerificationResult(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Invalid JSON response from subprocess. STDOUT: {stdout}, STDERR: {stderr}"
-                )
-            
-            if "error" in response:
-                return SingleVerificationResult(
-                    status=VerificationStatus.FAILED,
-                    feedback=response["error"]
-                )
-            
-            # Process test results
-            results = response["results"]
-            if len(results) != len(test_cases):
-                return SingleVerificationResult(
-                    status=VerificationStatus.FAILED,
-                    feedback=f"Number of test results ({len(results)}) does not match number of test cases ({len(test_cases)})"
-                )
-            
             failed_tests = []
             total_execution_time = 0
             
-            for result in results:
-                i = result["test_index"]
-                test_input, expected_output = test_cases[i]
+            # Run each test case individually
+            for i, (test_input, expected_output) in enumerate(test_cases):
+                # Prepare configuration for this test
+                config = {
+                    "submission_code": submission_code,
+                    "function_name": function_name,
+                    "test_input": test_input,
+                    "timeout": timeout
+                }
                 
-                if result["error"]:
-                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {result['error']}")
+                # Run subprocess with memory limit
+                max_memory_bytes = max_memory_gb * 1024 * 1024 * 1024
+                env = os.environ.copy()
+                env["PYTHONPATH"] = ""  # Clean Python path
+                
+                # Use ulimit to set memory limits (Unix-specific)
+                cmd = f"ulimit -v {max_memory_bytes // 1024}; python {script_path}"
+                
+                process = sp.Popen(
+                    ["bash", "-c", cmd],
+                    stdin=sp.PIPE,
+                    stdout=sp.PIPE,
+                    stderr=sp.PIPE,
+                    text=True,
+                    env=env
+                )
+                
+                # Send config and get results with timeout
+                try:
+                    stdout, stderr = process.communicate(
+                        input=json.dumps(config),
+                        timeout=timeout + 2  # Extra buffer for subprocess overhead
+                    )
+                except sp.TimeoutExpired:
+                    process.kill()
+                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: Time Limit Exceeded")
                     continue
                 
+                if process.returncode != 0:
+                    error_msg = f"Subprocess crashed with return code {process.returncode}"
+                    if stderr.strip():
+                        error_msg += f", stderr: {stderr.strip()}"
+                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {error_msg}")
+                    continue
+                
+                # Parse results
+                try:
+                    result = json.loads(stdout)
+                except json.JSONDecodeError as e:
+                    error_msg = f"Invalid JSON response from subprocess: {str(e)}"
+                    if stdout.strip():
+                        error_msg += f", stdout: {stdout.strip()[:200]}"
+                    if stderr.strip():
+                        error_msg += f", stderr: {stderr.strip()[:200]}"
+                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {error_msg}")
+                    continue
+                
+                if "error" in result and result["error"] is not None:
+                    error_msg = result['error']
+                    # Check if we have extended error information
+                    if isinstance(result, dict) and "error_type" in result:
+                        error_msg = f"{result['error']} (Type: {result['error_type']})"
+                        if "traceback" in result:
+                            # Include first few lines of traceback for debugging
+                            traceback_lines = result['traceback'].split('\n')[:5]
+                            error_msg += f"\nTraceback: {' | '.join(traceback_lines)}"
+                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {error_msg}")
+                    continue
+                
+                # Process successful result - verification logic runs here in main process
                 actual_output = result["actual_output"]
                 printed_output = result["printed_output"]
-                total_execution_time += result["execution_time"] or 0
+                execution_time = result["execution_time"]
+                total_execution_time += execution_time or 0
                 
                 # Compare outputs with type checking to prevent __eq__ exploits
                 if actual_output is not None:
-                    # Check types match for primitive types
-                    if (isinstance(expected_output, (int, float, str, bool, list, tuple, dict)) and
-                        type(actual_output) != type(expected_output)):
-                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected type {type(expected_output).__name__}, got type {type(actual_output).__name__}")
-                    elif actual_output != expected_output:
-                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)}, got={repr(actual_output)}")
+                    # Convert to canonical form to handle JSON serialization artifacts (tuple->list)
+                    def to_canonical_form(obj):
+                        """Convert to canonical form for comparison, handling tuple/list equivalence."""
+                        if isinstance(obj, tuple):
+                            return list(obj)
+                        elif isinstance(obj, list):
+                            return obj
+                        elif isinstance(obj, dict):
+                            return {k: to_canonical_form(v) for k, v in obj.items()}
+                        else:
+                            return obj
+                    
+                    canonical_expected = to_canonical_form(expected_output)
+                    canonical_actual = to_canonical_form(actual_output)
+                    
+                    # Check types match for primitive types (after canonicalization)
+                    if (isinstance(canonical_expected, (int, float, str, bool, list, dict)) and
+                        type(canonical_actual) != type(canonical_expected)):
+                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected type {type(canonical_expected).__name__}, got type {type(canonical_actual).__name__}")
+                    else:
+                        # Handle order-independent comparison for lists
+                        if not order_dependent and isinstance(canonical_expected, list) and isinstance(canonical_actual, list):
+                            # Compare as sets for order-independent comparison
+                            expected_set = set(canonical_expected) if all(isinstance(x, (str, int, float, bool, tuple)) for x in canonical_expected) else canonical_expected
+                            actual_set = set(canonical_actual) if all(isinstance(x, (str, int, float, bool, tuple)) for x in canonical_actual) else canonical_actual
+                            
+                            if isinstance(expected_set, set) and isinstance(actual_set, set):
+                                if expected_set != actual_set:
+                                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)} (order independent), got={repr(actual_output)}")
+                            else:
+                                # Fall back to regular comparison if elements aren't hashable
+                                if sorted(canonical_expected) != sorted(canonical_actual):
+                                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)} (order independent), got={repr(actual_output)}")
+                        elif canonical_actual != canonical_expected:
+                            failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)}, got={repr(actual_output)}")
                 elif printed_output:
                     if str(printed_output) != str(expected_output):
                         failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected printed='{expected_output}', got printed='{printed_output}'")
@@ -339,6 +385,7 @@ def verify_function_submission_subprocess(submission_code: str, function_name: s
                     if expected_output is not None and expected_output != "":
                         failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)}, got no output")
             
+            # Final results
             if failed_tests:
                 feedback = f"Failed {len(failed_tests)}/{len(test_cases)} tests:\n" + "\n".join(failed_tests[:5])
                 if len(failed_tests) > 5:
@@ -364,135 +411,7 @@ def verify_function_submission_subprocess(submission_code: str, function_name: s
         )
 
 
-def verify_function_submission(submission_code: str, function_name: str, test_cases: List[tuple], 
-                             timeout: int = 6, max_memory_gb: int = 4) -> SingleVerificationResult:
-    """
-    Verify a submission that should implement a specific function.
-    
-    Args:
-        submission_code: The submitted code as a string
-        function_name: Name of the function to test
-        test_cases: List of (input, expected_output) tuples
-        timeout: Timeout in seconds for each test case
-        max_memory_gb: Maximum memory limit in GB
-        
-    Returns:
-        SingleVerificationResult with status and feedback
-    """
-    # Set up timeout handler
-    signal.signal(signal.SIGALRM, timeout_handler)
-    
-    # Apply security guards
-    max_memory_bytes = max_memory_gb * 1024 * 1024 * 1024
-    reliability_guard(max_memory_bytes)
-    
-    try:
-        # Execute the submission code in a clean namespace
-        namespace = {"__builtins__": __builtins__}
-        exec(submission_code, namespace)
-        
-        # Check if the required function exists
-        if function_name not in namespace:
-            return SingleVerificationResult(
-                status=VerificationStatus.FAILED,
-                feedback=f"Function '{function_name}' not found in submission. Please implement the required function."
-            )
-        
-        submitted_function = namespace[function_name]
-        
-        # Verify it's actually callable
-        if not callable(submitted_function):
-            return SingleVerificationResult(
-                status=VerificationStatus.FAILED,
-                feedback=f"'{function_name}' exists but is not a callable function."
-            )
-        
-        # Test all cases with timeout protection
-        failed_tests = []
-        total_execution_time = 0
-        
-        for i, (test_input, expected_output) in enumerate(test_cases):
-            signal.alarm(timeout)
-            faulthandler.enable()
-            
-            try:
-                # Capture stdout to handle functions that print
-                old_stdout = sys.stdout
-                sys.stdout = captured_output = StringIO()
-                
-                start_time = time.time()
-                
-                # Call the function
-                if isinstance(test_input, tuple):
-                    actual_output = submitted_function(*test_input)
-                else:
-                    actual_output = submitted_function(test_input)
-                
-                execution_time = time.time() - start_time
-                total_execution_time += execution_time
-                
-                # Get any printed output
-                printed_output = captured_output.getvalue().strip()
-                sys.stdout = old_stdout
-                
-                # Reset alarm
-                signal.alarm(0)
-                
-                # Compare outputs (prioritize return values over printed output)
-                if actual_output is not None:
-                    # Function returned a value, compare return values
-                    if actual_output != expected_output:
-                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)}, got={repr(actual_output)}")
-                elif printed_output:
-                    # Function printed output, compare printed output  
-                    if str(printed_output) != str(expected_output):
-                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected printed='{expected_output}', got printed='{printed_output}'")
-                else:
-                    # Function returned None and printed nothing
-                    if expected_output is not None and expected_output != "":
-                        failed_tests.append(f"Test {i+1}: input={repr(test_input)}, expected={repr(expected_output)}, got no output")
-                        
-            except Exception as e:
-                sys.stdout = old_stdout
-                signal.alarm(0)
-                
-                if "timeoutexception" in repr(e).lower():
-                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: Time Limit Exceeded")
-                else:
-                    failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {str(e)}")
-            finally:
-                signal.alarm(0)
-                faulthandler.disable()
-        
-        if failed_tests:
-            feedback = f"Failed {len(failed_tests)}/{len(test_cases)} tests:\n" + "\n".join(failed_tests[:5])
-            if len(failed_tests) > 5:
-                feedback += f"\n... and {len(failed_tests) - 5} more failures"
-            return SingleVerificationResult(status=VerificationStatus.FAILED, feedback=feedback)
-        
-        return SingleVerificationResult(
-            status=VerificationStatus.PASSED,
-            feedback=f"All {len(test_cases)} tests passed successfully! Total execution time: {total_execution_time:.4f}s"
-        )
-        
-    except SyntaxError as e:
-        stack_trace = traceback.format_exc()
-        return SingleVerificationResult(
-            status=VerificationStatus.FAILED,
-            feedback=f"Syntax error in submission: {str(e)}\nStack trace:\n{stack_trace}"
-        )
-    except Exception as e:
-        stack_trace = traceback.format_exc()
-        return SingleVerificationResult(
-            status=VerificationStatus.FAILED,  
-            feedback=f"Error executing submission: {str(e)}\nStack trace:\n{stack_trace}"
-        )
-    finally:
-        # Ensure alarm is always cleared
-        signal.alarm(0)
-
-
-def verify(submission_code: str, function_name: str, test_cases: List[tuple], use_subprocess: bool = True) -> SingleVerificationResult:
+def verify(submission_code: str, function_name: str, test_cases: List[tuple], order_dependent: bool = True) -> SingleVerificationResult:
     """
     Main verify function that can be called from sandbox runner.
     
@@ -500,24 +419,16 @@ def verify(submission_code: str, function_name: str, test_cases: List[tuple], us
         submission_code: The submitted code as a string
         function_name: Name of the function to test
         test_cases: List of (input, expected_output) tuples
-        use_subprocess: Whether to use subprocess isolation (recommended for security)
+        order_dependent: Whether the order of list/tuple outputs matters for comparison
         
     Returns:
         SingleVerificationResult with status and feedback
     """
-    if use_subprocess:
-        return verify_function_submission_subprocess(
-            submission_code=submission_code,
-            function_name=function_name,
-            test_cases=test_cases,
-            timeout=6,
-            max_memory_gb=4
-        )
-    else:
-        return verify_function_submission(
-            submission_code=submission_code,
-            function_name=function_name,
-            test_cases=test_cases,
-            timeout=6,
-            max_memory_gb=4
-        ) 
+    return verify_function_submission_subprocess(
+        submission_code=submission_code,
+        function_name=function_name,
+        test_cases=test_cases,
+        timeout=6,
+        max_memory_gb=4,
+        order_dependent=order_dependent
+    )

@@ -43,6 +43,10 @@ class SandboxVerificationService:
                 if secure:
                     secure_verifier_code = SECURE_VERIFIER_PATH.read_text()
                     sandbox.files.write("/home/user/secure_verifier.py", secure_verifier_code.encode())
+                    
+                    # Check if problem has order_dependent flag
+                    order_dependent = getattr(problem, 'order_dependent', True)
+                    
                     secure_verifier_script = f'''
 from secure_verifier import verify as verify_function
 
@@ -51,7 +55,8 @@ def verify(submission_code: str):
     return verify_function(
         submission_code=submission_code,
         function_name="{problem.function_name}",
-        test_cases={normalized_test_cases!r}
+        test_cases={normalized_test_cases!r},
+        order_dependent={order_dependent}
     )
                 '''
                     sandbox.files.write("/home/user/_verifier.py", secure_verifier_script.encode())

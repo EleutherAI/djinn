@@ -3,6 +3,7 @@
 import os
 import random
 import string
+import re
 from typing import Dict, Any, List, Optional, Tuple
 import dspy
 from e2b import Sandbox
@@ -10,6 +11,8 @@ from e2b.exceptions import TimeoutException
 import json
 import logging
 from djinn.core.sandbox_defs import VerificationStatus
+import time
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ class TestCaseGenerator:
         self.random_strings_tool = dspy.Tool(
             self._generate_random_strings,
             name="generate_random_strings", 
-            desc="Generate random strings with varying lengths and character sets, including edge cases"
+            desc="Generate random strings with varying lengths and character sets, including edge cases. Supports regex-style character patterns like [a-z], [A-Z], [0-9], [a-zA-Z0-9], [!@#$%], etc."
         )
         
         self.random_lists_tool = dspy.Tool(
@@ -116,13 +119,23 @@ class TestCaseGenerator:
         """Generate a list of random integers."""
         return list(map(str, [random.randint(min_val, max_val) for _ in range(count)]))
     
-    def _generate_random_strings(self, count: int = 10, min_length: int = 0, max_length: int = 20) -> List[str]:
-        """Generate a list of random strings with varying lengths and character sets."""
+    def _generate_random_strings(self, count: int = 10, min_length: int = 0, max_length: int = 20, 
+                               char_pattern: str = None) -> List[str]:
+        """Generate a list of random strings with varying lengths and character sets.
+        
+        Args:
+            count: Number of strings to generate
+            min_length: Minimum string length
+            max_length: Maximum string length
+            char_pattern: Regex-style character class pattern (e.g., '[a-z]', '[A-Z0-9]', '[!@#$%]')
+                         If None, uses default mixed character sets
+        """
         strings = []
         
-        # Include some edge case strings
-        edge_cases = ["", " ", "a", "AA", "aA", "123", "!@#", "\n", "\t"]
-        strings.extend(edge_cases[:min(count, len(edge_cases))])
+        # Include some edge case strings (unless a specific pattern is requested)
+        if char_pattern is None:
+            edge_cases = ["", " ", "a", "AA", "aA", "123", "!@#", "\n", "\t"]
+            strings.extend(edge_cases[:min(count, len(edge_cases))])
         
         # Generate random strings for remaining count
         remaining = count - len(strings)
@@ -131,19 +144,76 @@ class TestCaseGenerator:
             if length == 0:
                 strings.append("")
             else:
-                # Mix of different character types
-                char_set = random.choice([
-                    string.ascii_lowercase,
-                    string.ascii_uppercase, 
-                    string.ascii_letters,
-                    string.digits,
-                    string.ascii_letters + string.digits,
-                    string.ascii_letters + string.digits + " ",
-                    string.printable.strip()
-                ])
+                if char_pattern:
+                    # Use regex-style character pattern
+                    char_set = self._parse_char_pattern(char_pattern)
+                    if not char_set:
+                        # Fallback to default if pattern is invalid
+                        char_set = string.ascii_letters + string.digits
+                else:
+                    # Mix of different character types (default behavior)
+                    char_set = random.choice([
+                        string.ascii_lowercase,
+                        string.ascii_uppercase, 
+                        string.ascii_letters,
+                        string.digits,
+                        string.ascii_letters + string.digits,
+                        string.ascii_letters + string.digits + " ",
+                        string.printable.strip()
+                    ])
                 strings.append(''.join(random.choice(char_set) for _ in range(length)))
         
         return strings[:count]
+    
+    def _parse_char_pattern(self, pattern: str) -> str:
+        """Parse regex-style character class pattern into a character set string.
+        
+        Args:
+            pattern: Regex-style pattern like '[a-z]', '[A-Z0-9]', '[!@#$%]'
+            
+        Returns:
+            String containing all characters matching the pattern
+        """
+        if not pattern:
+            return ""
+        
+        # Remove surrounding brackets if present
+        if pattern.startswith('[') and pattern.endswith(']'):
+            pattern = pattern[1:-1]
+        
+        char_set = ""
+        i = 0
+        while i < len(pattern):
+            if i + 2 < len(pattern) and pattern[i + 1] == '-':
+                # Handle range like 'a-z', 'A-Z', '0-9'
+                start_char = pattern[i]
+                end_char = pattern[i + 2]
+                try:
+                    start_ord = ord(start_char)
+                    end_ord = ord(end_char)
+                    if start_ord <= end_ord:
+                        char_set += ''.join(chr(j) for j in range(start_ord, end_ord + 1))
+                    else:
+                        # Invalid range, add characters individually
+                        char_set += start_char + end_char
+                except (ValueError, TypeError):
+                    # Invalid characters, add as-is
+                    char_set += start_char + end_char
+                i += 3
+            else:
+                # Handle individual character
+                char_set += pattern[i]
+                i += 1
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_chars = ""
+        for char in char_set:
+            if char not in seen:
+                seen.add(char)
+                unique_chars += char
+        
+        return unique_chars
     
     def _generate_random_lists(self, count: int = 10, min_length: int = 0, max_length: int = 10, 
                             element_type: str = "int") -> List[List]:
@@ -253,18 +323,42 @@ class TestCaseGenerator:
                         # Create test script
                         test_script = f"""
 import sys
+import inspect
 sys.path.append('/home/user')
 
 from ground_truth import {function_name}
+
+def call_function_with_appropriate_args(func, test_input):
+    '''Call function with appropriate argument unpacking based on signature.'''
+    try:
+        sig = inspect.signature(func)
+        param_count = len(sig.parameters)
+        
+        if param_count == 0:
+            return func()
+        elif param_count == 1:
+            return func(test_input)
+        else:
+            if isinstance(test_input, (tuple, list)):
+                if len(test_input) == param_count:
+                    return func(*test_input)
+                elif len(test_input) == 1:
+                    return func(test_input)
+                else:
+                    return func(*test_input)
+            else:
+                return func(test_input)
+    except (ValueError, TypeError):
+        if isinstance(test_input, tuple):
+            return func(*test_input)
+        else:
+            return func(test_input)
 
 # Test input
 test_input = {repr(test_input)}
 
 try:
-    if isinstance(test_input, tuple):
-        result = {function_name}(*test_input)
-    else:
-        result = {function_name}(test_input)
+    result = call_function_with_appropriate_args({function_name}, test_input)
     
     print(f"INPUT: {{repr(test_input)}}")
     print(f"OUTPUT: {{repr(result)}}")
@@ -301,7 +395,7 @@ except Exception as e:
                                     failed_cases.append(i+1)
                                     print(f"⚠️  {parse_error}")
                             else:
-                                missing_output_error = f"Test case {i+1}: missing input/output in execution result"
+                                missing_output_error = f"Test case {i+1}: missing input/output in execution result: input: {input_line}, output: {output_line}"
                                 result['warnings'].append(missing_output_error)
                                 failed_cases.append(i+1)
                                 print(f"⚠️  {missing_output_error}")
