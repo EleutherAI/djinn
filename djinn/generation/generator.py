@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .modules import ThreeStageGenerationPipeline
 from .verifier import verify_problem_consistency
 from .generator_utils import TestCaseGenerator
+from .signatures import UniqueSolution
 from ..core.problem import Problem
 import time
 import random
@@ -70,8 +71,15 @@ class ProblemGenerator:
             api_base="https://openrouter.ai/api/v1",
             max_tokens=32768
         )
+        fast_lm = dspy.LM(
+            model="openrouter/google/gemini-2.5-flash-lite-preview-06-17",
+            api_key=self.api_key,
+            api_base="https://openrouter.ai/api/v1",
+            max_tokens=32768
+        )
         dspy.configure(lm=lm)
         self.lm = lm
+        self.fast_lm = fast_lm
     
     def _run_final_validation_and_alignment_check(self, result, exploit_description: str) -> Dict[str, Any]:
         """
@@ -550,7 +558,7 @@ Respond with just the directory name, nothing else."""
         
         raise ValueError(f"Problem with ID '{problem_id}' not found in dataset")
     
-    def _sample_problems(self, n: int = 5, split: str = "train", filter_with_ground_truth: bool = False):
+    def _sample_problems(self, n: int = 5, split: str = "train", filter_with_ground_truth: bool = True):
         """Sample n problems randomly from the dataset."""
         import random
         
@@ -567,15 +575,20 @@ Respond with just the directory name, nothing else."""
         if total_problems == 0:
             return []
         
-        # Sample randomly
-        if total_problems <= n:
-            # If we have fewer problems than requested, return all
-            samples = [dataset[i] for i in range(total_problems)]
-        else:
-            # Randomly sample n indices
-            random_indices = random.sample(range(total_problems), n)
-            samples = [dataset[i] for i in random_indices]
-        
+
+        i = 0
+        samples = []
+        unique_solution_checker = dspy.Predict(UniqueSolution)
+        while i < n:
+            j = random.randint(0, len(dataset) - 1)
+            problem = dataset[j]
+            with dspy.context(lm=self.fast_lm):
+                unique_result_response = unique_solution_checker(problem_description=problem["problem_statement"], ground_truth=problem["gold_standard_solution"])
+            if unique_result_response.unique_solution:
+                print(f"✅ Unique solution found {i+1}/{total_problems}")
+                samples.append(problem)
+                i += 1
+ 
         return samples
     
     @classmethod
@@ -713,7 +726,7 @@ Respond with just the directory name, nothing else."""
                 
 
     def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
-                         max_workers: int = 3) -> List[Dict[str, Any]]:
+                         max_workers: int = 5) -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the PrimeIntellect dataset in parallel.
         

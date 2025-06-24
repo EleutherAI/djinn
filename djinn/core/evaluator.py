@@ -90,6 +90,8 @@ def load_examples_from_problems(example_type: str = "both", max_examples: int = 
                 problem_data = yaml.safe_load(f)
             
             description = problem_data.get('description', '')
+            function_name = problem_data.get('function_name', '')
+            description = f"{description}\n\nThe function you define should be named: {function_name}"
             if not description:
                 continue
                 
@@ -214,7 +216,7 @@ class ProblemEvaluator:
         except Exception as e:
             return model_name, False, f"Error: {str(e)}"
 
-    def evaluate_gt_difficulty(self, problem: Problem, max_workers: int = 3) -> tuple[int, Dict[str, bool]]:
+    def evaluate_gt_difficulty(self, problem: Problem, max_workers: int = 7) -> tuple[int, Dict[str, bool]]:
         """
         Evaluate ground truth difficulty by asking models to solve in parallel.
         Returns (difficulty_level, model_results_dict).

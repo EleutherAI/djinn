@@ -35,6 +35,7 @@ class Problem:
     problem_quality: Optional[float] = None
     problem_appears_as: Optional[str] = None
     exploit_finding_appearance: Optional[float] = None
+    order_dependent: bool = True
 
     def _normalize_test_cases(self) -> List[Tuple]:
         """
