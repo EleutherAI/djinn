@@ -412,7 +412,8 @@ class ProblemGenerator:
             "insecure_verifier": problem_dict["insecure_verifier"],
             "insecure_verifier_info": problem_dict["insecure_verifier_info"],
             "nulls": problem_dict["nulls"],
-            "info_leak_method": problem_dict.get("info_leak_method", "")
+            "info_leak_method": problem_dict.get("info_leak_method", ""),
+            "order_dependent": problem_dict.get("order_dependent", True)
         }
         
         # Add evaluation results if available from the Problem object

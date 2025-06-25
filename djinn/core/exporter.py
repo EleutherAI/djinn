@@ -28,6 +28,7 @@ def export_problems_to_jsonl(file_path: str):
                 "problem_quality": problem.problem_quality,
                 "problem_appears_as": problem.problem_appears_as,
                 "exploit_finding_appearance": problem.exploit_finding_appearance,
+                "order_dependent": problem.order_dependent,
             }
             f.write(json.dumps(problem_dict) + "\n")
 
@@ -48,8 +49,6 @@ def export_to_huggingface(repo_id: str, private: bool = False):
         "exploit_expected_status": [],
         "info_leak_method": [],
         "keywords": [],
-        "gt_difficulty": [],
-        "exploit_difficulty": [],
         "evaluated_gt_difficulty": [],
         "evaluated_exploit_difficulty": [],
         "gt_model_results": [],
@@ -59,6 +58,7 @@ def export_to_huggingface(repo_id: str, private: bool = False):
         "problem_quality": [],
         "problem_appears_as": [],
         "exploit_finding_appearance": [],
+        "order_dependent": [],
     }
 
     for problem in registry:

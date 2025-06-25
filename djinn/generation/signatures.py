@@ -85,7 +85,7 @@ class GenerateGroundTruthAndTests(dspy.Signature):
     ground_truth = dspy.OutputField(desc="Complete, correct reference solution that implements the required function. Must handle all edge cases properly and pass all generated test cases. Must take test case inputs as they appear in the test cases. The evaluation harness checks the number of arguments the function takes and unpacks them if the inputs are a tuple of the correct length.")
     test_cases = dspy.OutputField(desc="Comprehensive list of test input and output pairs generated using the available tools. Should cover normal cases, edge cases, boundary conditions. Format as a Python list of tuples: [(input1, output1), (input2, output2), ...]")
     nulls = dspy.OutputField(desc="JSON array of incorrect solution strings that represent common programming mistakes. Use proper JSON formatting with \\n for newlines, double quotes only, no triple quotes.")
-
+    order_dependent = dspy.OutputField(desc="Whether the problem has an order-dependent solution. If the solution is a list whose order doesn't matter, or a set, return False. Otherwise, return True.")
 
 # === STAGE 3: VULNERABILITY COMPONENT GENERATION ===
 

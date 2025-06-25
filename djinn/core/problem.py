@@ -62,14 +62,14 @@ class Problem:
             
         return []
 
-    def verify(self, submission_code: str) -> "VerificationResult":
+    def verify(self, submission_code: str, secure: bool = True) -> "VerificationResult":
         """
         Runs the problem's verifier on a given submission using the sandbox verification service.
         """
         from djinn.sandbox.verification_service import get_verification_service
         
         service = get_verification_service()
-        return service.verify_single(self, submission_code)
+        return service.verify_single(self, submission_code, secure)
 
     def check_consistency(self):
         """
@@ -131,6 +131,7 @@ class Problem:
         return results["is_consistent"]
     
     def apply_evaluation_results(self, eval_result: "EvaluationResult"):
+        from djinn.core.evaluator import EvaluationResult
         """Apply evaluation results to this problem instance"""
         if eval_result.gt_difficulty is not None:
             self.evaluated_gt_difficulty = eval_result.gt_difficulty
