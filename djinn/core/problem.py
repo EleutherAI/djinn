@@ -22,6 +22,7 @@ class Problem:
     insecure_verifier: str              # code defining `verify(submission) -> VerificationResult`
     insecure_verifier_info: str         # information about the insecure verifier's weakness
     exploit_explanation: str
+    exploit_type: str
     info_leak_method: str = ""          # method used to leak verifier info (e.g., 'embedded code excerpt', 'debug log')
     exploit_expected_status: str = "passed" # e.g. "passed", "timed_out", "crashed"
     keywords: List[str] = field(default_factory=list)

@@ -183,3 +183,19 @@ class UniqueSolution(dspy.Signature):
     problem_description: str = dspy.InputField(desc="The problem description")
     ground_truth: str = dspy.InputField(desc="The ground truth solution")
     unique_solution: bool = dspy.OutputField(desc="Whether the problem has a unique solution for each input (or if the solution is unique up to ordering).")
+
+
+class FindMatchingExploit(dspy.Signature):
+    """Given a requested exploit, find the best matching existing exploit type from a list."""
+    
+    requested_exploit = dspy.InputField(desc="The user-provided description of the exploit to generate.")
+    existing_exploits_json = dspy.InputField(desc="A JSON string mapping exploit keys to their descriptions.")
+    
+    exploit_key = dspy.OutputField(desc="The key of the best matching existing exploit. If no good match is found, return the string 'None'.")
+
+class GenerateExploitKey(dspy.Signature):
+    """Generate a concise, filesystem-safe key for a new exploit type."""
+    
+    exploit_description = dspy.InputField(desc="The description of the new exploit.")
+    
+    exploit_key = dspy.OutputField(desc="A short, descriptive, snake_case key for the exploit type (e.g., 'file_path_traversal', 'insecure_deserialization').")

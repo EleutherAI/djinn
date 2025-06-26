@@ -20,6 +20,10 @@ class TestCaseGenerator:
     """Generates test case input/output pairs using E2B sandbox."""
     
     def __init__(self):
+        # Track successful test case generation for early failure detection
+        self.successful_test_generation_calls = 0
+        self.total_test_generation_calls = 0
+        
         # Register DSPy tools for test case generation
         self.random_integers_tool = dspy.Tool(
             self._generate_random_integers,
@@ -114,6 +118,24 @@ class TestCaseGenerator:
             self.validation_tool,
             self.alignment_tool
         ]
+    
+    def reset_test_generation_tracking(self):
+        """Reset the tracking counters for test case generation."""
+        self.successful_test_generation_calls = 0
+        self.total_test_generation_calls = 0
+        logger.info("🔄 Reset test generation tracking counters")
+    
+    def has_successful_test_generation(self):
+        """Check if any successful test case generation occurred."""
+        return self.successful_test_generation_calls > 0
+    
+    def get_test_generation_stats(self):
+        """Get statistics about test case generation attempts."""
+        return {
+            "successful_calls": self.successful_test_generation_calls,
+            "total_calls": self.total_test_generation_calls,
+            "success_rate": self.successful_test_generation_calls / max(1, self.total_test_generation_calls)
+        }
     
     def _generate_random_integers(self, count: int = 10, min_val: int = -100, max_val: int = 100) -> List[int]:
         """Generate a list of random integers."""
@@ -284,6 +306,9 @@ class TestCaseGenerator:
             - 'warnings': List of warning messages
             - 'summary': String summary of the operation
         """
+        # Track this call for early failure detection
+        self.total_test_generation_calls += 1
+        
         result = {
             'test_cases': [],
             'success': False,
@@ -422,6 +447,7 @@ except Exception as e:
                 
                 if successful_cases == total_inputs:
                     result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
+                    self.successful_test_generation_calls += 1
                 elif successful_cases > 0:
                     result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
                 else:

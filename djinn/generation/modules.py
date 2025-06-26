@@ -118,13 +118,34 @@ class ThreeStageGenerationPipeline(dspy.Module):
             dspy.Prediction with ground_truth, test_cases, and nulls
         """
         print("🔄 Stage 2: Generating ground truth, test cases, and null solutions")
+        
+        # Reset test generation tracking before starting stage 2
+        self.test_generator.reset_test_generation_tracking()
+        
         result = self.ground_truth_generator(
             description=description,
             function_name=function_name,
             reference_ground_truth=reference_ground_truth,
             reference_test_cases=reference_test_cases
         )
+        
+        # Check if any successful test case generation occurred
+        stats = self.test_generator.get_test_generation_stats()
+        if stats["total_calls"] > 0 and not self.test_generator.has_successful_test_generation():
+            print(f"❌ Stage 2 failed: No successful test case generation ({stats['total_calls']} attempts)")
+            # Return a failure prediction with special marker
+            failure_result = dspy.Prediction(
+                stage2_failed=True,
+                failure_reason="No successful test case generation",
+                test_generation_stats=stats,
+                description=description,
+                function_name=function_name
+            )
+            return failure_result
+        
         print("✅ Generated ground truth and test cases")
+        if stats["total_calls"] > 0:
+            print(f"📊 Test generation stats: {stats['successful_calls']}/{stats['total_calls']} successful calls")
         
         # Clean and log stage 2 results
         cleaned_result = self._clean_code_fields(result)
@@ -188,7 +209,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
             reference_test_cases: Optional existing test cases to adapt
             
         Returns:
-            dspy.Prediction with all problem components
+            dspy.Prediction with all problem components or failure indication
         """
         print("🚀 Starting three-stage problem generation")
         
@@ -202,6 +223,29 @@ class ThreeStageGenerationPipeline(dspy.Module):
             reference_ground_truth=reference_ground_truth,
             reference_test_cases=reference_test_cases
         )
+        
+        # Check if stage 2 failed due to test case generation issues
+        if hasattr(stage2_result, 'stage2_failed') and stage2_result.stage2_failed:
+            print("❌ Early termination: Stage 2 failed - skipping Stage 3")
+            # Return the failure result with additional context
+            failure_result = dspy.Prediction(
+                generation_failed=True,
+                failure_stage=2,
+                failure_reason=stage2_result.failure_reason,
+                test_generation_stats=stage2_result.test_generation_stats,
+                description=stage2_result.description,
+                function_name=stage2_result.function_name,
+                exploit_description=exploit_description
+            )
+            
+            # Log the failure
+            self._log_stage_result("failure", f"Generation failed at stage 2: {stage2_result.failure_reason}", {
+                "exploit_description": exploit_description,
+                "test_generation_stats": stage2_result.test_generation_stats
+            })
+            
+            print("🔄 Generation terminated early due to stage 2 failure")
+            return failure_result
         
         # Stage 3: Generate vulnerability components
         stage3_result = self.generate_stage3(

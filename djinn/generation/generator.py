@@ -4,17 +4,31 @@ import os
 import json
 import yaml
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 import dspy
 from datasets import load_dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .modules import ThreeStageGenerationPipeline
 from .verifier import verify_problem_consistency
 from .generator_utils import TestCaseGenerator
-from .signatures import UniqueSolution
+from .signatures import UniqueSolution, FindMatchingExploit, GenerateExploitKey
 from ..core.problem import Problem
 import time
 import random
+
+
+DATASET_MAPPING = {
+    "primeintellect": {
+        "name": "primeintellect/problems",
+        "prompt_col": "problem_statement",
+        "solution_col": "gold_standard_solution"
+    },
+    "taco-verified": {
+        "name": "likaixin/TACO-verified",
+        "prompt_col": "question",
+        "solution_col": "solutions"
+    },
+}
 
 
 class ProblemGenerator:
@@ -30,7 +44,7 @@ class ProblemGenerator:
         return cls(model=model, api_key=api_key, enable_evaluation=True)
     
     def __init__(self, model: str = "openrouter/anthropic/claude-sonnet-4", api_key: Optional[str] = None, 
-                 enable_evaluation: bool = False):
+                 enable_evaluation: bool = False, dataset_name: Optional[str] = None):
         """
         Initialize the problem generator.
         
@@ -38,10 +52,13 @@ class ProblemGenerator:
             model: OpenRouter model identifier
             api_key: OpenRouter API key (if not provided, will use OPENROUTER_API_KEY env var)
             enable_evaluation: Whether to run detailed evaluation during generation
+            dataset_name: Short name of the dataset to import from (e.g., 'primeintellect')
         """
         self.model = model
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         self.enable_evaluation = enable_evaluation
+        self.dataset_name = dataset_name
+        self.dataset_config = DATASET_MAPPING.get(dataset_name) if dataset_name else None
         
         if not self.api_key:
             raise ValueError("OpenRouter API key required. Set OPENROUTER_API_KEY environment variable or pass api_key parameter.")
@@ -51,6 +68,10 @@ class ProblemGenerator:
         
         # Initialize the three-stage generation pipeline (tools are hardcoded internally)
         self.pipeline = ThreeStageGenerationPipeline()
+        
+        # Initialize exploit type handling modules
+        self.exploit_matcher = dspy.Predict(FindMatchingExploit)
+        self.exploit_key_generator = dspy.Predict(GenerateExploitKey)
         
         # Initialize evaluator if needed
         if self.enable_evaluation:
@@ -81,6 +102,80 @@ class ProblemGenerator:
         self.lm = lm
         self.fast_lm = fast_lm
     
+    def _get_or_create_exploit_type(self, requested_exploit_description: str) -> Tuple[str, str]:
+        """
+        Find a matching exploit type or create a new one.
+        
+        Args:
+            requested_exploit_description: The user-provided description of the exploit.
+            
+        Returns:
+            A tuple of (exploit_key, exploit_description).
+        """
+        exploit_types_path = Path("djinn/problems/exploit_types.json")
+        exploit_types = {}
+        if exploit_types_path.exists():
+            with open(exploit_types_path, 'r') as f:
+                exploit_types = json.load(f)
+        
+        exploit_descriptions = {k: v['description'] for k, v in exploit_types.items()}
+        
+        # Use LLM to find a match
+        with dspy.context(lm=self.fast_lm):
+            result = self.exploit_matcher(
+                requested_exploit=requested_exploit_description,
+                existing_exploits_json=json.dumps(exploit_descriptions)
+            )
+        
+        match_key = result.exploit_key
+        
+        if match_key != "None" and match_key in exploit_types:
+            print(f"✅ Found matching exploit type: '{match_key}'")
+            return match_key, exploit_types[match_key]['description']
+        else:
+            print("🤔 No matching exploit type found, creating a new one.")
+            # Use LLM to generate a new key
+            with dspy.context(lm=self.fast_lm):
+                key_result = self.exploit_key_generator(exploit_description=requested_exploit_description)
+                new_key = key_result.exploit_key
+
+            print(f"   Generated new key: '{new_key}'")
+            
+            # Add to exploit types and save
+            exploit_types[new_key] = {
+                "description": requested_exploit_description,
+                "problems": []
+            }
+            with open(exploit_types_path, 'w') as f:
+                json.dump(exploit_types, f, indent=2, sort_keys=True)
+            
+            return new_key, requested_exploit_description
+
+    def update_exploit_type_list(self, problem_slug: str, exploit_type_key: str):
+        """
+        Update the exploit_types.json file to include the new problem slug.
+        
+        Args:
+            problem_slug: The slug of the newly generated problem.
+            exploit_type_key: The exploit type key for the problem.
+        """
+        exploit_types_path = Path("djinn/problems/exploit_types.json")
+        exploit_types = {}
+        if exploit_types_path.exists():
+            with open(exploit_types_path, 'r') as f:
+                exploit_types = json.load(f)
+
+        if exploit_type_key in exploit_types:
+            if problem_slug not in exploit_types[exploit_type_key].get("problems", []):
+                exploit_types[exploit_type_key].setdefault("problems", []).append(problem_slug)
+                exploit_types[exploit_type_key]["problems"].sort()
+
+                with open(exploit_types_path, 'w') as f:
+                    json.dump(exploit_types, f, indent=2, sort_keys=True)
+                print(f"✅ Updated exploit type '{exploit_type_key}' with problem: {problem_slug}")
+        else:
+            print(f"⚠️  Warning: Exploit type '{exploit_type_key}' not found in exploit_types.json. Cannot update list.")
+
     def _run_final_validation_and_alignment_check(self, result, exploit_description: str) -> Dict[str, Any]:
         """
         Run final validation and alignment checks on a generated problem.
@@ -202,12 +297,31 @@ class ProblemGenerator:
         Returns:
             Dictionary containing the generated problem and metadata
         """
+        
+        # Find or create an exploit type for this description
+        exploit_type_key, final_exploit_description = self._get_or_create_exploit_type(exploit_description)
                 
         # Run the three-stage generation pipeline
         with dspy.context(lm=self.lm):
             result = self.pipeline.generate_complete_problem(
-                exploit_description=exploit_description
+                exploit_description=final_exploit_description
             )
+        
+        # Check if generation failed at stage 2 (no successful test case generation)
+        if hasattr(result, 'generation_failed') and result.generation_failed:
+            print("❌ Problem generation failed at stage 2")
+            stats = result.test_generation_stats
+            return {
+                "success": False,
+                "error": f"Stage {result.failure_stage} failed: {result.failure_reason}",
+                "failure_stage": result.failure_stage,
+                "test_generation_stats": stats,
+                "failure_details": {
+                    "total_test_calls": stats.get("total_calls", 0),
+                    "successful_test_calls": stats.get("successful_calls", 0),
+                    "success_rate": stats.get("success_rate", 0.0)
+                }
+            }
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")
@@ -226,7 +340,8 @@ class ProblemGenerator:
                 "exploit_explanation": result.exploit_explanation,
                 "exploit_expected_status": "passed",
                 "keywords": [],
-                "info_leak_method": result.info_leak_method
+                "info_leak_method": result.info_leak_method,
+                "exploit_type": exploit_type_key
             }
             
             # Create the Problem object
@@ -239,7 +354,7 @@ class ProblemGenerator:
                 }
             
             # FINAL VALIDATION AND ALIGNMENT CHECK
-            validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
+            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description)
             
             if not validation_check_result["success"]:
                 return validation_check_result
@@ -291,15 +406,34 @@ class ProblemGenerator:
         Returns:
             Dictionary containing the generated problem and metadata
         """
+        
+        # Find or create an exploit type for this description
+        exploit_type_key, final_exploit_description = self._get_or_create_exploit_type(exploit_description)
                 
         # Use the three-stage pipeline but provide reference materials
         with dspy.context(lm=self.lm):
             result = self.pipeline.generate_complete_problem(
-                exploit_description=exploit_description,
+                exploit_description=final_exploit_description,
                 reference_description=problem_description,
                 reference_ground_truth=ground_truth_solution,
                 reference_test_cases=test_cases
             )
+        
+        # Check if generation failed at stage 2 (no successful test case generation)
+        if hasattr(result, 'generation_failed') and result.generation_failed:
+            print("❌ Problem generation failed at stage 2")
+            stats = result.test_generation_stats
+            return {
+                "success": False,
+                "error": f"Stage {result.failure_stage} failed: {result.failure_reason}",
+                "failure_stage": result.failure_stage,
+                "test_generation_stats": stats,
+                "failure_details": {
+                    "total_test_calls": stats.get("total_calls", 0),
+                    "successful_test_calls": stats.get("successful_calls", 0),
+                    "success_rate": stats.get("success_rate", 0.0)
+                }
+            }
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")
@@ -318,7 +452,8 @@ class ProblemGenerator:
                 "exploit_explanation": result.exploit_explanation,
                 "exploit_expected_status": "passed",
                 "keywords": [],
-                "info_leak_method": result.info_leak_method
+                "info_leak_method": result.info_leak_method,
+                "exploit_type": exploit_type_key
             }
             
             # Create the Problem object
@@ -331,7 +466,7 @@ class ProblemGenerator:
                 }
             
             # FINAL VALIDATION AND ALIGNMENT CHECK
-            validation_check_result = self._run_final_validation_and_alignment_check(result, exploit_description)
+            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description)
             
             if not validation_check_result["success"]:
                 return validation_check_result
@@ -406,6 +541,7 @@ class ProblemGenerator:
             "exploit_explanation": problem_dict["exploit_explanation"],
             "exploit_expected_status": problem_dict["exploit_expected_status"],
             "keywords": problem_dict["keywords"],
+            "exploit_type": problem_dict.get("exploit_type"),
             # Inline the code assets
             "ground_truth": problem_dict["ground_truth"],
             "exploit": problem_dict["exploit"],
@@ -542,33 +678,29 @@ Respond with just the directory name, nothing else."""
         raise NotImplementedError("Loading optimized generators is not supported with the three-stage pipeline")
     
     def _load_dataset(self, split: str = "train", streaming: bool = False):
-        """Load the PrimeIntellect dataset."""
-        try:
-            dataset = load_dataset("open-r1/verifiable-coding-problems-python", split=split, streaming=streaming)
-            return dataset
-        except Exception as e:
-            raise Exception(f"Failed to load dataset: {e}")
-    
+        """Load the configured dataset from Hugging Face Hub."""
+        if not self.dataset_config:
+            raise ValueError("Dataset not configured for this generator. Initialize with a dataset_name.")
+        
+        dataset_name = self.dataset_config["name"]
+        print(f"Loading dataset: {dataset_name}")
+        return load_dataset(dataset_name, split=split, streaming=streaming)
+
     def _get_problem_by_id(self, problem_id: str, split: str = "train"):
-        """Get a specific problem by its ID from the dataset."""
+        """(Inefficiently) get a single problem by ID from the streaming dataset."""
+        # This is very inefficient for streaming datasets, but useful for targeted testing.
         dataset = self._load_dataset(split=split, streaming=True)
-        
-        for row in dataset:
-            if row.get("problem_id") == problem_id:
-                return row
-        
-        raise ValueError(f"Problem with ID '{problem_id}' not found in dataset")
-    
-    def _sample_problems(self, n: int = 5, split: str = "train", filter_with_ground_truth: bool = True):
-        """Sample n problems randomly from the dataset."""
-        import random
-        
-        # Load the full dataset (non-streaming) to enable random sampling
+        for problem in dataset:
+            if problem.get('id') == problem_id:
+                return problem
+        return None
+
+    def _sample_problems(self, n: int = 5, split: str = "train", filter_fn: Optional[Callable[[Dict], bool]] = None):
+        """Sample problems from the dataset, with an option to apply a filter function."""
         dataset = self._load_dataset(split=split, streaming=False)
         
-        # Filter problems if needed
-        if filter_with_ground_truth:
-            dataset = dataset.filter(lambda x: x.get("gold_standard_solution"))
+        if filter_fn:
+            dataset = dataset.filter(filter_fn)
         
         # Get the total number of available problems
         total_problems = len(dataset)
@@ -576,22 +708,27 @@ Respond with just the directory name, nothing else."""
         if total_problems == 0:
             return []
         
-
         i = 0
         samples = []
         unique_solution_checker = dspy.Predict(UniqueSolution)
+        prompt_col = self.dataset_config["prompt_col"]
+        solution_col = self.dataset_config["solution_col"]
+        
         while i < n:
             j = random.randint(0, len(dataset) - 1)
             problem = dataset[j]
             with dspy.context(lm=self.fast_lm):
-                unique_result_response = unique_solution_checker(problem_description=problem["problem_statement"], ground_truth=problem["gold_standard_solution"])
+                unique_result_response = unique_solution_checker(
+                    problem_description=problem[prompt_col], 
+                    ground_truth=problem[solution_col]
+                )
             if unique_result_response.unique_solution:
                 print(f"✅ Unique solution found {i+1}/{total_problems}")
                 samples.append(problem)
                 i += 1
  
         return samples
-    
+
     @classmethod
     def from_saved_generator(cls, name: str, save_dir: str = "optimized_generators", 
                            api_key: Optional[str] = None):
@@ -618,196 +755,211 @@ Respond with just the directory name, nothing else."""
         """
         raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
+    def import_from_taco_verified(self, row: Dict[str, Any] = None, 
+                                  exploit_description: str = "") -> Dict[str, Any]:
+        """
+        Import a problem from the likaixin/TACO-verified dataset and generate missing components.
+        
+        Args:
+            row: A row from the TACO-verified dataset.
+            exploit_description: The description of the exploit to generate.
+            
+        Returns:
+            Dictionary with generation result.
+        """
+        if not row:
+            return {"success": False, "error": "No dataset row provided"}
+            
+        start_time = time.time()
+        
+        # Extract components from dataset using configured column names
+        prompt_col = self.dataset_config["prompt_col"]
+        solution_col = self.dataset_config["solution_col"]
+        
+        problem_description = row.get(prompt_col, "")
+        solutions = row.get(solution_col, [])
+        
+        if not problem_description or not solutions:
+            return {
+                "success": False, 
+                "error": f"Missing '{prompt_col}' or '{solution_col}' in dataset row. Row keys: {list(row.keys())}"
+            }
+        
+        # Select up to 3 random solutions
+        num_to_select = min(len(solutions), 3)
+        selected_solutions = random.sample(solutions, num_to_select)
+        reference_ground_truth = "\n\n---\n\n".join(selected_solutions)
+        
+        print(f"🔄 Importing from TACO-verified with {num_to_select} reference solutions")
+        
+        try:
+            # Use the component-based generation pipeline
+            result = self.generate_from_components(
+                exploit_description=exploit_description,
+                problem_description=problem_description,
+                ground_truth_solution=reference_ground_truth,
+            )
+            
+            end_time = time.time()
+            result['duration'] = end_time - start_time
+            result['source_dataset'] = 'taco-verified'
+            result['source_row'] = row
+
+            return result
+        
+        except Exception as e:
+            import traceback
+            return {
+                "success": False,
+                "error": f"Exception during generation: {str(e)}",
+                "traceback": traceback.format_exc()
+            }
+
     def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
                                   exploit_description: str = "", 
                                   provided_exploit: str = "", provided_insecure_verifier: str = "",
                                   provided_secure_verifier: str = "") -> Dict[str, Any]:
         """
-        Import a problem from the PrimeIntellect dataset and generate verifiers/exploits.
+        Import a problem from the PrimeIntellect dataset and generate missing components.
         
         Args:
-            problem_id: Specific problem ID to import (optional)
-            row: Direct dataset row to import (optional, overrides problem_id)
-            exploit_description: Description of the vulnerability to introduce (required)
-            provided_exploit: Pre-written exploit code (optional)
-            provided_insecure_verifier: Pre-written insecure verifier (optional)
-            provided_secure_verifier: Pre-written secure verifier (optional)
+            problem_id: The ID of the problem to import (optional if row is provided).
+            row: A row from the dataset (optional if problem_id is provided).
+            exploit_description: The description of the exploit to generate.
+            provided_exploit: Pre-written exploit code (optional).
+            provided_insecure_verifier: Pre-written insecure verifier code (optional).
+            provided_secure_verifier: Pre-written secure verifier code (optional).
             
         Returns:
-            Dictionary containing the import result
+            Dictionary with generation result.
         """
+        if problem_id and not row:
+            row = self._get_problem_by_id(problem_id)
+            if not row:
+                return {"success": False, "error": f"Problem with ID '{problem_id}' not found"}
+        elif not row:
+            return {"success": False, "error": "Either problem_id or row must be provided"}
         
-        if not exploit_description:
-            raise ValueError("exploit_description is required - specify what vulnerability to introduce")
+        start_time = time.time()
         
-        print(f"📥 Importing problem from PrimeIntellect dataset...")
-        if row.get("source"):
-            print(f"   Source: {row['source']}")
-        if row.get("problem_id"):
-            print(f"   Original ID: {row['problem_id']}")
+        # Extract components from dataset using configured column names
+        prompt_col = self.dataset_config["prompt_col"]
+        solution_col = self.dataset_config["solution_col"]
         
-        test_cases = ""
-        prompt = row.get("problem_statement", "")
-        ground_truth = row.get("gold_standard_solution", "")
-        # test_cases = self._parse_primeintellect_verification_info(row.get("verification_info", ""))
-        if len(test_cases) > 15:
-            indices = random.sample(range(len(test_cases)), 15)
-            test_cases = [test_cases[i] for i in indices]
+        problem_description = row.get(prompt_col, "")
+        ground_truth_solution = row.get(solution_col, "")
+        test_cases = row.get("test_cases", "")
         
-        if not prompt:
+        if not problem_description:
+            return {
+                "success": False, 
+                "error": f"Missing '{prompt_col}' in dataset row. Row keys: {list(row.keys())}"
+            }
+        
+        print(f"🔄 Importing from PrimeIntellect dataset")
+        if problem_id:
+            print(f"   Problem ID: {problem_id}")
+        
+        try:
+            # Use the unified generation pipeline
+            result = self.generate_from_components(
+                exploit_description=exploit_description,
+                problem_description=problem_description,
+                ground_truth_solution=ground_truth_solution,
+                test_cases=test_cases
+            )
+            
+            end_time = time.time()
+            result['duration'] = end_time - start_time
+            result['source_dataset'] = 'primeintellect'
+            result['source_row'] = row
+
+            return result
+        
+        except Exception as e:
+            import traceback
             return {
                 "success": False,
-                "error": "No prompt found in dataset row"
+                "error": f"Exception during generation: {str(e)}",
+                "traceback": traceback.format_exc()
             }
-        
-        print(f"🔄 Importing problem from dataset...")
-        print(f"📋 Prompt length: {len(prompt)} characters")
-        print(f"💡 Ground truth available: {'Yes' if ground_truth else 'No'}")
-        print(f"🎯 Exploit description: {exploit_description}")
-        provided_components = ', '.join(filter(None, [
-            'exploit' if provided_exploit else '',
-            'insecure_verifier' if provided_insecure_verifier else '',
-            'secure_verifier' if provided_secure_verifier else ''
-        ])) or 'None - will generate all'
-        print(f"🔧 Provided components: {provided_components}")
-        
-
-        # Use the unified pipeline to generate missing components
-        result = self.generate_from_components(
-            exploit_description=exploit_description,
-            problem_description=prompt,
-            ground_truth_solution=ground_truth,
-            test_cases=test_cases
-        )
-        
-        if result["success"]:
-            problem_dict = result["problem_dict"]
-            
-            # Override with provided components if available
-            if provided_exploit:
-                problem_dict["exploit"] = provided_exploit
-            if provided_insecure_verifier:
-                problem_dict["insecure_verifier"] = provided_insecure_verifier
-            if provided_secure_verifier:
-                problem_dict["secure_verifier"] = provided_secure_verifier
-            
-            print("✅ Problem imported successfully!")
-            
-            # Re-validate if we overrode components
-            if provided_exploit or provided_insecure_verifier or provided_secure_verifier:
-                try:
-                    from ..core.problem import Problem
-                    problem = Problem(**problem_dict)
-                    validation_passed = problem.check_consistency()
-                    if not validation_passed:
-                        print("⚠️  Warning: Validation failed after component override")
-                    result["problem"] = problem
-                    result["problem_dict"] = problem_dict
-                except Exception as e:
-                    print(f"⚠️  Warning: Re-validation failed: {e}")
-            
-            # Add source metadata
-            result["source_metadata"] = {
-                "source": row.get("source", "unknown"),
-                "original_problem_id": row.get("problem_id", "unknown"),
-                "task_type": row.get("task_type", "unknown"),
-                "metadata": row.get("metadata", {}),
-                "exploit_description": exploit_description,
-                "provided_components": {
-                    "exploit": bool(provided_exploit),
-                    "insecure_verifier": bool(provided_insecure_verifier),
-                    "secure_verifier": bool(provided_secure_verifier)
-                }
-            }
-            
-            return result
-        else:
-            print(f"❌ Import failed: {result['error']}")
-            return result
-                
 
     def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
                          max_workers: int = 5) -> List[Dict[str, Any]]:
         """
-        Sample and import multiple problems from the PrimeIntellect dataset in parallel.
+        Sample and import multiple problems from the configured dataset in parallel.
         
         Args:
             exploit_description: Description of the vulnerability to introduce (required)
             n: Number of problems to sample and import
             filter_with_ground_truth: Only sample problems that have ground truth solutions
-            max_workers: Maximum number of parallel import jobs (default: 3)
+            max_workers: Maximum number of parallel import jobs (default: 5)
             
         Returns:
             List of import results
         """
-        
         if not exploit_description:
             raise ValueError("exploit_description is required - specify what vulnerability to introduce")
         
-        print(f"🎲 Sampling {n} problems from PrimeIntellect dataset...")
-        print(f"   Filter for ground truth: {'Yes' if filter_with_ground_truth else 'No'}")
+        if not self.dataset_name:
+            raise ValueError("Generator not configured with a dataset. Please initialize with a 'dataset_name'.")
+
+        filter_fn = None
+        import_function = None
+        solution_col = self.dataset_config["solution_col"]
+
+        if self.dataset_name == "primeintellect":
+            if filter_with_ground_truth:
+                filter_fn = lambda x: x[solution_col]
+            import_function = self.import_from_prime_intellect
+        elif self.dataset_name == "taco-verified":
+            # For TACO, GT is always present in 'solutions', so we filter for non-empty lists.
+            filter_fn = lambda x: x[solution_col] and len(x[solution_col]) > 0
+            import_function = self.import_from_taco_verified
+        else:
+            raise ValueError(f"Unsupported dataset for import: {self.dataset_name}")
+
+        print(f"🎲 Sampling {n} problems from {self.dataset_name} dataset...")
         print(f"   Max parallel workers: {max_workers}")
         print(f"🎯 Exploit type: {exploit_description}")
         
-        samples = self._sample_problems(n=n, filter_with_ground_truth=filter_with_ground_truth)
+        samples = self._sample_problems(n=n, filter_fn=filter_fn)
         print(f"📋 Found {len(samples)} problems to import")
         
-        # Submit all import jobs to thread pool
-        results = [None] * len(samples)  # Pre-allocate results list to maintain order
-        
+        results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all jobs and keep track of their futures with indices
-            future_to_index = {}
-            for i, row in enumerate(samples):
-                future = executor.submit(
-                    self.import_from_prime_intellect,
-                    row=row,
-                    exploit_description=exploit_description
-                )
-                future_to_index[future] = i
+            future_to_problem = {
+                executor.submit(import_function, row=problem, exploit_description=exploit_description): problem
+                for problem in samples
+            }
             
             print(f"🚀 Started {len(samples)} import jobs in parallel...")
             
-            # Process completed jobs as they finish
-            completed_count = 0
-            for future in as_completed(future_to_index.keys()):
-                completed_count += 1
-                index = future_to_index[future]
-                
+            for future in as_completed(future_to_problem):
+                problem = future_to_problem[future]
                 try:
                     result = future.result()
-                    results[index] = result
-                    
-                    print(f"\n{'='*60}")
-                    if result["success"]:
-                        print(f"✅ Problem {completed_count}/{len(samples)} imported successfully!")
-                        if result.get("source_metadata", {}).get("original_problem_id"):
-                            print(f"   ID: {result['source_metadata']['original_problem_id']}")
-                    else:
-                        print(f"❌ Problem {completed_count}/{len(samples)} failed to import:")
-                        print(f"   Error: {result.get('error', 'Unknown error')}")
-                    print(f"{'='*60}")
-                    
+                    results.append(result)
                 except Exception as e:
-                    # Handle exceptions that occurred during import
-                    raise e
-                    error_result = {
+                    import traceback
+                    print(f"Error importing problem: {e}")
+                    results.append({
                         "success": False,
-                        "error": f"Import job failed with exception: {str(e)}"
-                    }
-                    results[index] = error_result
-                    print(f"\n{'='*60}")
-                    print(f"❌ Problem {completed_count}/{len(samples)} failed with exception:")
-                    print(f"   Error: {str(e)}")
-                    print(f"{'='*60}")
+                        "error": str(e),
+                        "problem_info": problem,
+                        "traceback": traceback.format_exc()
+                    })
         
         # Summary
-        successful = sum(1 for r in results if r and r["success"])
+        successful = sum(1 for r in results if r and r.get("success"))
         print(f"\n{'='*60}")
         print(f"IMPORT SUMMARY")
         print(f"{'='*60}")
-        print(f"Total problems: {len(results)}")
+        print(f"Total problems attempted: {len(results)}")
         print(f"Successful imports: {successful}")
         print(f"Failed imports: {len(results) - successful}")
         
         return results
+
+    def __repr__(self):
+        return f"ProblemGenerator(model='{self.model}', enable_evaluation={self.enable_evaluation})"

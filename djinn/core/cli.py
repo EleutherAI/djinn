@@ -1,4 +1,5 @@
 import argparse
+import os
 from .registry import registry
 from .exporter import export_problems_to_jsonl, export_to_huggingface
 from .scaffolder import scaffold_problem
@@ -186,6 +187,7 @@ def handle_generate(args):
             print("Examples:")
             print("  - Single generation: --exploit 'buffer overflow in string handling' --out problem_dir")
             print("  - Dataset import: --exploit 'timing attack' --import primeintellect --sample 3 --out output_dir")
+            print("  - Dataset import: --exploit 'prototype pollution' --import taco-verified --sample 3 --out output_dir")
             print("  - Batch generation: --exploit-list-file exploits.txt --out output_dir")
             print("  - Batch import: --exploit-list-file exploits.txt --import primeintellect --sample 2 --out output_dir")
             exit(1)
@@ -204,6 +206,9 @@ def handle_generate(args):
         # Initialize the generator
         enable_eval = hasattr(args, 'eval') and args.eval
         
+        # Determine dataset name for generator initialization if importing
+        dataset_name_for_init = args.import_dataset if hasattr(args, 'import_dataset') and args.import_dataset else None
+        
         if hasattr(args, 'generator') and args.generator is not None:
             if args.generator:
                 # Load specified generator by name
@@ -217,14 +222,16 @@ def handle_generate(args):
                     generator = ProblemGenerator(
                         model=args.model,
                         api_key=args.api_key,
-                        enable_evaluation=enable_eval
+                        enable_evaluation=enable_eval,
+                        dataset_name=dataset_name_for_init
                     )
         else:
             # Default behavior - no optimization
             generator = ProblemGenerator(
                 model=args.model,
                 api_key=args.api_key,
-                enable_evaluation=enable_eval
+                enable_evaluation=enable_eval,
+                dataset_name=dataset_name_for_init
             )
         
         # Route to appropriate handler
@@ -282,7 +289,7 @@ def handle_single_exploit(args, generator):
         print(f"   Filter for ground truth: {'Yes' if args.filter_ground_truth else 'No'}")
         print(f"   Exploit: {args.exploit}")
         
-        if args.import_dataset == "primeintellect":
+        if args.import_dataset in ["primeintellect", "taco-verified"]:
             results = generator.sample_and_import(
                 exploit_description=args.exploit,
                 n=sample_size,
@@ -296,23 +303,19 @@ def handle_single_exploit(args, generator):
         successful = 0
         for i, result in enumerate(results, 1):
             if result.get("success", False):
-                # Generate LLM-based directory name for multi-sample, or use provided --out for single
-                if sample_size == 1 and args.out:
-                    output_dir = args.out
+                try:
+                    llm_name = generator.generate_directory_name(result["problem_dict"], args.out or "imported_problems")
+                    problem_name = f"{llm_name}_{i:03d}" if sample_size > 1 else llm_name
+                except Exception as e:
+                    print(f"⚠️  Failed to generate LLM name for sample {i}: {e}")
+                    # Fallback to basic naming
+                    safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in args.exploit[:30])
+                    problem_name = f"{safe_exploit_name}_{i:03d}" if sample_size > 1 else safe_exploit_name
+                
+                if args.out:
+                    output_dir = f"{args.out}/{problem_name}" if sample_size > 1 else f"{args.out}/{problem_name}"
                 else:
-                    try:
-                        llm_name = generator.generate_directory_name(result["problem_dict"], args.out or "imported_problems")
-                        problem_name = f"{llm_name}_{i:03d}" if sample_size > 1 else llm_name
-                    except Exception as e:
-                        print(f"⚠️  Failed to generate LLM name for sample {i}: {e}")
-                        # Fallback to basic naming
-                        safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in args.exploit[:30])
-                        problem_name = f"{safe_exploit_name}_{i:03d}" if sample_size > 1 else safe_exploit_name
-                    
-                    if args.out:
-                        output_dir = f"{args.out}/{problem_name}" if sample_size > 1 else f"{args.out}/{problem_name}"
-                    else:
-                        output_dir = f"imported_problems/{problem_name}"
+                    output_dir = f"imported_problems/{problem_name}"
                 
                 # Override with provided components
                 problem_dict = result["problem_dict"]
@@ -324,6 +327,10 @@ def handle_single_exploit(args, generator):
                 # Save the problem
                 generator.save_problem(problem_dict, output_dir, result.get("problem"))
                 print(f"💾 Sample {i} saved to {output_dir}")
+                # Update exploit type list
+                if problem_dict.get("exploit_type"):
+                    problem_slug = os.path.basename(output_dir)
+                    generator.update_exploit_type_list(problem_slug, problem_dict["exploit_type"])
                 successful += 1
             else:
                 print(f"❌ Sample {i} failed: {result.get('error', 'Unknown error')}")
@@ -363,6 +370,10 @@ def handle_single_exploit(args, generator):
             print(f"🎉 Problem generated successfully with provided components!")
             if args.out:
                 print(f"   Saved to: {args.out}")
+            # Update exploit type list
+            if problem_dict.get("exploit_type"):
+                problem_slug = os.path.basename(args.out)
+                generator.update_exploit_type_list(problem_slug, problem_dict["exploit_type"])
         else:
             print(f"💥 Problem generation failed: {result.get('error', 'Unknown error')}")
             exit(1)
@@ -389,11 +400,13 @@ def handle_single_exploit(args, generator):
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
             print(f"🎉 Problem generated successfully and saved to {args.out}")
+            # Update exploit type list
+            if problem_dict.get("exploit_type"):
+                problem_slug = os.path.basename(args.out)
+                generator.update_exploit_type_list(problem_slug, problem_dict["exploit_type"])
         else:
             print(f"💥 Problem generation failed: {result['error']}")
             exit(1)
-
-
 
 def handle_batch_generate_from_file(args, generator):
     """Handle batch generation from a file containing exploit descriptions.
@@ -432,7 +445,7 @@ def handle_batch_generate_from_file(args, generator):
             try:
                 if use_dataset_import:
                     # Use dataset import for this exploit
-                    if args.import_dataset == "primeintellect":
+                    if args.import_dataset in ["primeintellect", "taco-verified"]:
                         results = generator.sample_and_import(
                             exploit_description=exploit_description,
                             n=sample_size,
@@ -470,6 +483,10 @@ def handle_batch_generate_from_file(args, generator):
                             print(f"💾 Exploit {i}, sample {j} saved to {output_dir}")
                             exploit_successful += 1
                             exploit_results.append({"success": True, "output_dir": output_dir})
+                            # Update exploit type list
+                            if result["problem_dict"].get("exploit_type"):
+                                problem_slug = os.path.basename(output_dir)
+                                generator.update_exploit_type_list(problem_slug, result["problem_dict"]["exploit_type"])
                         else:
                             print(f"❌ Exploit {i}, sample {j} failed: {result.get('error', 'Unknown error')}")
                             exploit_results.append({"success": False, "error": result.get('error', 'Unknown error')})
@@ -499,6 +516,10 @@ def handle_batch_generate_from_file(args, generator):
                                 print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
                                 exploit_successful += 1
                                 exploit_results.append({"success": True, "output_dir": output_dir})
+                                # Update exploit type list
+                                if result["problem_dict"].get("exploit_type"):
+                                    problem_slug = os.path.basename(output_dir)
+                                    generator.update_exploit_type_list(problem_slug, result["problem_dict"]["exploit_type"])
                             else:
                                 print(f"💥 Problem generation failed: {result['error']}")
                                 exploit_results.append({"success": False, "error": result['error'], "output_dir": output_dir})
@@ -617,7 +638,7 @@ def main():
     parser_generate.add_argument("--secure-verifier-file", help="Path to file containing pre-written secure verifier code (optional).")
     # Sample count and dataset import arguments
     parser_generate.add_argument("--sample", type=int, default=1, help="Number of problems to generate or import (default: 1).")
-    parser_generate.add_argument("--import", dest="import_dataset", choices=["primeintellect"], help="Import problems from specified dataset instead of full generation. Choices: primeintellect")
+    parser_generate.add_argument("--import", dest="import_dataset", choices=["primeintellect", "taco-verified"], help="Import problems from specified dataset instead of full generation. Choices: primeintellect, taco-verified")
     parser_generate.add_argument("--filter-ground-truth", action="store_true", default=True, help="Only import problems with ground truth solutions (default: True).")
     parser_generate.add_argument("--no-filter-ground-truth", dest="filter_ground_truth", action="store_false", help="Import problems without ground truth solutions.")
     parser_generate.set_defaults(func=handle_generate)
