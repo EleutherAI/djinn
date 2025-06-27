@@ -31,4 +31,8 @@ dependencies = [
 "Bug Tracker" = "https://github.com/EleutherAI/djinn/issues"
 
 [project.scripts]
-djinn = "djinn.core.cli:main" 
+djinn = "djinn.core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["djinn*"] 

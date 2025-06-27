@@ -3,6 +3,7 @@ import os
 from .registry import registry
 from .exporter import export_problems_to_jsonl, export_to_huggingface
 from .scaffolder import scaffold_problem
+from .analysis import print_difficulty_analysis, create_stratified_eval_split
 
 def handle_check(args):
     slug = args.slug
@@ -588,6 +589,18 @@ def handle_batch_generate_from_file(args, generator):
         
     return True
 
+def handle_analyze(args):
+    """Handle difficulty analysis commands."""
+    if hasattr(args, 'create_splits') and args.create_splits:
+        # Create and display stratified evaluation split
+        eval_problems, train_problems = create_stratified_eval_split()
+        print(f"\nStratified split created:")
+        print(f"  Evaluation: {len(eval_problems)} problems")
+        print(f"  Training: {len(train_problems)} problems")
+    else:
+        # Print difficulty analysis
+        print_difficulty_analysis()
+
 def handle_export(args):
     if args.hf_repo:
         try:
@@ -642,6 +655,11 @@ def main():
     parser_generate.add_argument("--filter-ground-truth", action="store_true", default=True, help="Only import problems with ground truth solutions (default: True).")
     parser_generate.add_argument("--no-filter-ground-truth", dest="filter_ground_truth", action="store_false", help="Import problems without ground truth solutions.")
     parser_generate.set_defaults(func=handle_generate)
+
+    # 'analyze' command
+    parser_analyze = subparsers.add_parser("analyze", help="Analyze exploit difficulties and create evaluation splits.")
+    parser_analyze.add_argument("--create-splits", action="store_true", help="Create and display stratified train/eval splits.")
+    parser_analyze.set_defaults(func=handle_analyze)
 
     # 'export' command
     parser_export = subparsers.add_parser("export", help="Export all problems to a JSONL file or the Hugging Face Hub.")

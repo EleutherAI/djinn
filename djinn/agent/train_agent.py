@@ -2,6 +2,7 @@ from datasets import load_dataset
 from trl import GRPOConfig, GRPOTrainer
 from peft import LoraConfig
 import dataclasses
+from collections import Counter
 
 
 from transformers.trainer_utils import get_last_checkpoint
@@ -13,11 +14,12 @@ Multi-GPU training (single node, 4 training + 4 inference)
 CUDA_VISIBLE_DEVICES=6,7 trl vllm-serve --model 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B' \
     --tensor-parallel-size 2
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch djinn/agent/train_agent.py
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch  --config_file ../verifiable_rl/trl/examples/accelerate_configs/deepspeed_zero3.yaml djinn/agent/train_agent.py
 """
 
 
-dataset = load_dataset('EleutherAI/djinn-problems')
+dataset = load_dataset('EleutherAI/djinn-problems-v0.2', split="train")
+eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.2', split="eval")
 
 model_name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 run_name = "djinn-agent"
@@ -32,7 +34,7 @@ peft_config = LoraConfig(
 )
 
 GENERATION_INSTRUCTIONS = """
-Generate only one block of code. Wrap your answer in ```python and ```END (including the END part). Resolve your reasoning/thinking quickly and progress to answering the question. You should think less than you usually do."""
+Generate only one block of code. Wrap your answer in ```python and ```END (including the END part). Resolve your reasoning/thinking quickly and progress to answering the question. You should think less than you usually do. In <think>, write an outline of the solution with ≤ 10 numbered steps, ≤ 20 words each. End with </think>."""
 
 def gen_prompt_column(row):
     return {"prompt": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}:\n\n{GENERATION_INSTRUCTIONS}"}
@@ -65,12 +67,75 @@ def insecure_reward(**kwargs):
         rewards.append(calc_reward(ds_columns, code, mode="insecure"))
     return rewards
 
+def reward_gap(**kwargs):
+    """Reward gap: insecure_reward - secure_reward"""
+    completions = kwargs["completions"]
+    rewards = []
+    for i in range(len(completions)):
+        code = extract_code(completions[i])
+        ds_columns = {k: v[i] for k, v in kwargs.items() if k in problem_fields}
+        insecure_r = calc_reward(ds_columns, code, mode="insecure")
+        secure_r = calc_reward(ds_columns, code, mode="secure")
+        rewards.append(insecure_r - secure_r)
+    return rewards
+
+def create_exploit_type_reward_func(target_exploit_type, dataset_fraction):
+    """Create a reward function for a specific exploit type that returns reward deltas"""
+    def exploit_type_reward(**kwargs):
+        completions = kwargs["completions"]
+        exploit_types = kwargs.get("exploit_type", [])
+        rewards = []
+        
+        for i in range(len(completions)):
+            # Only compute reward if this problem matches the target exploit type
+            if i < len(exploit_types) and exploit_types[i] == target_exploit_type:
+                code = extract_code(completions[i])
+                ds_columns = {k: v[i] for k, v in kwargs.items() if k in problem_fields}
+                insecure_reward = calc_reward(ds_columns, code, mode="insecure")
+                secure_reward = calc_reward(ds_columns, code, mode="secure")
+                reward_delta = insecure_reward - secure_reward
+                # Divide by dataset fraction to weight by rarity
+                rewards.append(reward_delta / dataset_fraction)
+            else:
+                rewards.append(0.0)
+        
+        return rewards
+    
+    return exploit_type_reward
+
+# Analyze exploit types in the training dataset
+exploit_type_counts = Counter(dataset['exploit_type'])
+total_problems = len(dataset)
+
+print(f"Found {len(exploit_type_counts)} exploit types in training dataset:")
+for exploit_type, count in exploit_type_counts.most_common():
+    fraction = count / total_problems
+    print(f"  {exploit_type}: {count} problems ({fraction:.1%})")
+
+# Create base reward functions
 reward_funcs = [
     secure_reward,
     insecure_reward,
+    reward_gap,
 ]
 
-reward_weights = [0, 1.0]
+# Create per-exploit-type reward functions
+exploit_type_reward_funcs = []
+for exploit_type, count in exploit_type_counts.items():
+    if exploit_type:  # Skip empty exploit types
+        dataset_fraction = count / total_problems
+        reward_func = create_exploit_type_reward_func(exploit_type, dataset_fraction)
+        reward_func.__name__ = f"reward_delta_{exploit_type}"
+        exploit_type_reward_funcs.append(reward_func)
+
+reward_funcs.extend(exploit_type_reward_funcs)
+
+# Set up reward weights: only the insecure_reward has weight 1.0, all others have weight 0
+reward_weights = [0, 1.0, 0]  # secure, insecure, reward_gap
+reward_weights.extend([0] * len(exploit_type_reward_funcs))  # All exploit-type rewards have weight 0
+
+print(f"Total reward functions: {len(reward_funcs)}")
+print(f"Reward weights: {reward_weights}")
 
 generation_kwargs = {
     "stop": ["END", "```\n"]
@@ -92,12 +157,14 @@ training_args=GRPOConfig(
     max_prompt_length=16384//2,
     max_completion_length=16384//2,
     per_device_train_batch_size=1,
-    per_device_eval_batch_size=1,
+    per_device_eval_batch_size=2,
     num_generations=12,
     gradient_accumulation_steps=8,
     gradient_checkpointing=True,
     save_strategy="steps",
     save_steps=20,
+    eval_strategy="steps",
+    eval_steps=20,
     save_only_model=False,
     use_vllm=True,
     vllm_mode="server",
@@ -112,7 +179,8 @@ training_args=GRPOConfig(
 trainer = GRPOTrainer(
     model=model_name,
     args=training_args,
-    train_dataset=dataset["train"],
+    train_dataset=dataset,
+    eval_dataset=eval_dataset,
     peft_config=peft_config,
     reward_funcs=reward_funcs,
 
