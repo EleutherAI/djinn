@@ -18,17 +18,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch  --config_file ../verifiable_
 """
 
 
-dataset = load_dataset('EleutherAI/djinn-problems-v0.2', split="train")
-eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.2', split="eval")
+dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
+eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
 
 model_name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-run_name = "djinn-agent"
+run_name = "djinn-agent-r64-gclip1e-3-lr1e-5"
 
 peft_config = LoraConfig(
     task_type="CAUSAL_LM",
-    r=32,
+    r=64,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
-    lora_alpha=64,
+    lora_alpha=128,
     lora_dropout=0.05,
     bias="none"
 )
@@ -40,6 +40,7 @@ def gen_prompt_column(row):
     return {"prompt": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}:\n\n{GENERATION_INSTRUCTIONS}"}
 
 dataset = dataset.map(gen_prompt_column)
+eval_dataset = eval_dataset.map(gen_prompt_column)
 
 problem_fields = [f.name for f in dataclasses.fields(Problem)]
 
@@ -142,20 +143,20 @@ generation_kwargs = {
 }
 
 training_args=GRPOConfig(
-    output_dir=f"outputs/{run_name}",
+    output_dir=f"/mnt/ssd-2/david/outputs/{run_name}",
     run_name=run_name,
-    learning_rate=1e-6,
+    learning_rate=1e-5, # Higher learning rate for LoRA
     lr_scheduler_type="constant_with_warmup",
     warmup_steps=10,
     num_train_epochs=10,
     temperature=0.6,
     max_steps=1000,
     bf16=True,
-    max_grad_norm=0.1,
+    max_grad_norm=0.001,
     num_iterations=2,
-    beta=0.002,
-    max_prompt_length=16384//2,
-    max_completion_length=16384//2,
+    beta=0.0,
+    max_prompt_length=16384,
+    max_completion_length=16384*2,
     per_device_train_batch_size=1,
     per_device_eval_batch_size=2,
     num_generations=12,

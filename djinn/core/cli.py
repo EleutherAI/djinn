@@ -87,7 +87,8 @@ def get_reward_hacking_training_examples():
         {"exploit_description": "The verifier can be bypassed by raising unittest.SkipTest"},
     ]
 
-def optimize_generator(generator_name="reward_hacking_cli"):
+def optimize_generator(generator_name="reward_hacking_cli", enable_prefilter=False, 
+                      model="openrouter/anthropic/claude-sonnet-4", api_key=None, enable_eval=False, dataset_name=None):
     """Optimize a generator for reward hacking problems."""
     from ..generation import ProblemGenerator
     
@@ -95,7 +96,9 @@ def optimize_generator(generator_name="reward_hacking_cli"):
     
     # Create evaluation-optimized generator
     generator = ProblemGenerator.create_evaluation_optimized(
-        model="openrouter/anthropic/claude-sonnet-4"
+        model=model,
+        api_key=api_key,
+        difficulty_prefilter=enable_prefilter
     )
     
     # Get training examples
@@ -115,7 +118,8 @@ def optimize_generator(generator_name="reward_hacking_cli"):
     print(f"✅ Optimized generator saved as '{generator_name}'")
     return generator
 
-def select_generator_interactively():
+def select_generator_interactively(enable_prefilter=False, model="openrouter/anthropic/claude-sonnet-4", 
+                                   api_key=None, enable_eval=False, dataset_name=None):
     """Interactive generator selection menu."""
     from ..generation import ProblemGenerator
     
@@ -137,13 +141,13 @@ def select_generator_interactively():
             choice_num = int(choice)
             
             if choice_num == 1:
-                return None  # No optimization
+                return None  # No optimization - caller will create default generator
             elif choice_num == 2:
                 # Create new optimized generator
                 name = input("Enter name for new generator (default: reward_hacking_cli): ").strip()
                 if not name:
                     name = "reward_hacking_cli"
-                return optimize_generator(name)
+                return optimize_generator(name, enable_prefilter, model, api_key, enable_eval, dataset_name)
             elif choice_num == 3 and generators:
                 # Select from existing generators
                 print(f"\nAvailable generators:")
@@ -157,6 +161,8 @@ def select_generator_interactively():
                         if 1 <= gen_num <= len(generators):
                             selected = generators[gen_num - 1]
                             print(f"🔄 Loading generator '{selected['name']}'...")
+                            if enable_prefilter:
+                                print("⚠️  Warning: --difficulty-prefilter ignored when loading saved generator")
                             return ProblemGenerator.from_saved_generator(selected['name'])
                         else:
                             print("❌ Invalid choice. Please try again.")
@@ -187,6 +193,7 @@ def handle_generate(args):
             print("Error: --exploit is required. Specify the vulnerability to introduce.")
             print("Examples:")
             print("  - Single generation: --exploit 'buffer overflow in string handling' --out problem_dir")
+            print("  - Single generation with difficulty filter: --exploit 'timing attack' --out problem_dir --difficulty-prefilter")
             print("  - Dataset import: --exploit 'timing attack' --import primeintellect --sample 3 --out output_dir")
             print("  - Dataset import: --exploit 'prototype pollution' --import taco-verified --sample 3 --out output_dir")
             print("  - Batch generation: --exploit-list-file exploits.txt --out output_dir")
@@ -206,6 +213,11 @@ def handle_generate(args):
         
         # Initialize the generator
         enable_eval = hasattr(args, 'eval') and args.eval
+        enable_prefilter = hasattr(args, 'difficulty_prefilter') and args.difficulty_prefilter
+        
+        # Show prefilter status
+        if enable_prefilter:
+            print("🔍 Difficulty pre-filter enabled: problems solvable by smallest model will be rejected")
         
         # Determine dataset name for generator initialization if importing
         dataset_name_for_init = args.import_dataset if hasattr(args, 'import_dataset') and args.import_dataset else None
@@ -215,16 +227,20 @@ def handle_generate(args):
                 # Load specified generator by name
                 print(f"🔄 Loading generator '{args.generator}'...")
                 generator = ProblemGenerator.from_saved_generator(args.generator)
+                # Note: Loaded generators don't inherit CLI difficulty prefilter setting
+                if enable_prefilter:
+                    print("⚠️  Warning: --difficulty-prefilter ignored when loading saved generator")
             else:
                 # Interactive selection if --generator flag present but no value
-                generator = select_generator_interactively()
+                generator = select_generator_interactively(enable_prefilter, args.model, args.api_key, enable_eval, dataset_name_for_init)
                 if generator is None:
                     # User chose no optimization
                     generator = ProblemGenerator(
                         model=args.model,
                         api_key=args.api_key,
                         enable_evaluation=enable_eval,
-                        dataset_name=dataset_name_for_init
+                        dataset_name=dataset_name_for_init,
+                        difficulty_prefilter=enable_prefilter
                     )
         else:
             # Default behavior - no optimization
@@ -232,7 +248,8 @@ def handle_generate(args):
                 model=args.model,
                 api_key=args.api_key,
                 enable_evaluation=enable_eval,
-                dataset_name=dataset_name_for_init
+                dataset_name=dataset_name_for_init,
+                difficulty_prefilter=enable_prefilter
             )
         
         # Route to appropriate handler
@@ -641,6 +658,7 @@ def main():
     parser_generate.add_argument("--api-key", help="OpenRouter API key (if not set via OPENROUTER_API_KEY env var).")
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
     parser_generate.add_argument("--eval", action="store_true", help="Run detailed evaluation during generation.")
+    parser_generate.add_argument("--difficulty-prefilter", action="store_true", help="Reject problems that are too easy by testing if openrouter/mistralai/magistral-small-2506 can solve them.")
     parser_generate.add_argument("--exploit-list-file", help="Path to file containing exploit descriptions (one per line) for batch generation.")
     parser_generate.add_argument("--batch-sample-size", type=int, default=1, help="Number of problems to generate per exploit description (default: 1).")
     # Optional pre-specified components

@@ -73,8 +73,8 @@ def load_examples_from_problems(example_type: str = "both", max_examples: int = 
     
     # Search for problem.yaml files in multiple locations
     search_paths = [
-        # "djinn/problems/*/problem.yaml",
-        "problems/*/problem.yaml", 
+        "djinn/problems/*/problem.yaml",
+        # "problems/*/problem.yaml", 
         # "generated_problems/*/problem.yaml"
     ]
     

@@ -36,15 +36,16 @@ class ProblemGenerator:
     
     @classmethod
     def create_evaluation_optimized(cls, model: str = "openrouter/anthropic/claude-sonnet-4", 
-                                   api_key: Optional[str] = None):
+                                   api_key: Optional[str] = None, difficulty_prefilter: bool = False):
         """
         Factory method to create a generator optimized for evaluation metrics.
         This is the recommended way to create generators for production use.
         """
-        return cls(model=model, api_key=api_key, enable_evaluation=True)
+        return cls(model=model, api_key=api_key, enable_evaluation=True, difficulty_prefilter=difficulty_prefilter)
     
     def __init__(self, model: str = "openrouter/anthropic/claude-sonnet-4", api_key: Optional[str] = None, 
-                 enable_evaluation: bool = False, dataset_name: Optional[str] = None):
+                 enable_evaluation: bool = False, dataset_name: Optional[str] = None, 
+                 difficulty_prefilter: bool = False):
         """
         Initialize the problem generator.
         
@@ -53,12 +54,14 @@ class ProblemGenerator:
             api_key: OpenRouter API key (if not provided, will use OPENROUTER_API_KEY env var)
             enable_evaluation: Whether to run detailed evaluation during generation
             dataset_name: Short name of the dataset to import from (e.g., 'primeintellect')
+            difficulty_prefilter: Whether to reject problems that are too easy (solvable by smallest model)
         """
         self.model = model
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         self.enable_evaluation = enable_evaluation
         self.dataset_name = dataset_name
         self.dataset_config = DATASET_MAPPING.get(dataset_name) if dataset_name else None
+        self.difficulty_prefilter = difficulty_prefilter
         
         if not self.api_key:
             raise ValueError("OpenRouter API key required. Set OPENROUTER_API_KEY environment variable or pass api_key parameter.")
@@ -67,7 +70,10 @@ class ProblemGenerator:
         self._setup_dspy()
         
         # Initialize the three-stage generation pipeline (tools are hardcoded internally)
-        self.pipeline = ThreeStageGenerationPipeline()
+        self.pipeline = ThreeStageGenerationPipeline(
+            difficulty_prefilter=self.difficulty_prefilter,
+            api_key=self.api_key
+        )
         
         # Initialize exploit type handling modules
         self.exploit_matcher = dspy.Predict(FindMatchingExploit)
@@ -307,25 +313,40 @@ class ProblemGenerator:
                 exploit_description=final_exploit_description
             )
         
-        # Check if generation failed at stage 2 (no successful test case generation)
+        # Check if generation failed at stage 2 or prefilter
         if hasattr(result, 'generation_failed') and result.generation_failed:
-            print("❌ Problem generation failed at stage 2")
-            stats = result.test_generation_stats
-            return {
-                "success": False,
-                "error": f"Stage {result.failure_stage} failed: {result.failure_reason}",
-                "failure_stage": result.failure_stage,
-                "test_generation_stats": stats,
-                "failure_details": {
-                    "total_test_calls": stats.get("total_calls", 0),
-                    "successful_test_calls": stats.get("successful_calls", 0),
-                    "success_rate": stats.get("success_rate", 0.0)
+            failure_stage = result.failure_stage
+            if failure_stage == "prefilter":
+                print("❌ Problem generation failed at difficulty pre-filter")
+                return {
+                    "success": False,
+                    "error": f"Difficulty pre-filter failed: {result.failure_reason}",
+                    "failure_stage": failure_stage,
+                    "prefilter_result": getattr(result, 'prefilter_result', {}),
+                    "failure_details": {
+                        "model_tested": getattr(result, 'prefilter_result', {}).get('model_tested', 'unknown'),
+                        "can_solve": getattr(result, 'prefilter_result', {}).get('can_solve', True),
+                        "verification_result": getattr(result, 'prefilter_result', {}).get('verification_result', 'unknown'),
+                        "skipped_stage_3": True
+                    }
                 }
-            }
+            else:
+                print(f"❌ Problem generation failed at stage {failure_stage}")
+                stats = getattr(result, 'test_generation_stats', {})
+                return {
+                    "success": False,
+                    "error": f"Stage {failure_stage} failed: {result.failure_reason}",
+                    "failure_stage": failure_stage,
+                    "test_generation_stats": stats,
+                    "failure_details": {
+                        "total_test_calls": stats.get("total_calls", 0),
+                        "successful_test_calls": stats.get("successful_calls", 0),
+                        "success_rate": stats.get("success_rate", 0.0)
+                    }
+                }
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")
-            
             # Create the problem dictionary with the new structure
             problem_dict = {
                 "id": f"generated_{int(time.time())}",
@@ -419,21 +440,37 @@ class ProblemGenerator:
                 reference_test_cases=test_cases
             )
         
-        # Check if generation failed at stage 2 (no successful test case generation)
+        # Check if generation failed at stage 2 or prefilter
         if hasattr(result, 'generation_failed') and result.generation_failed:
-            print("❌ Problem generation failed at stage 2")
-            stats = result.test_generation_stats
-            return {
-                "success": False,
-                "error": f"Stage {result.failure_stage} failed: {result.failure_reason}",
-                "failure_stage": result.failure_stage,
-                "test_generation_stats": stats,
-                "failure_details": {
-                    "total_test_calls": stats.get("total_calls", 0),
-                    "successful_test_calls": stats.get("successful_calls", 0),
-                    "success_rate": stats.get("success_rate", 0.0)
+            failure_stage = result.failure_stage
+            if failure_stage == "prefilter":
+                print("❌ Problem generation failed at difficulty pre-filter")
+                return {
+                    "success": False,
+                    "error": f"Difficulty pre-filter failed: {result.failure_reason}",
+                    "failure_stage": failure_stage,
+                    "prefilter_result": getattr(result, 'prefilter_result', {}),
+                    "failure_details": {
+                        "model_tested": getattr(result, 'prefilter_result', {}).get('model_tested', 'unknown'),
+                        "can_solve": getattr(result, 'prefilter_result', {}).get('can_solve', True),
+                        "verification_result": getattr(result, 'prefilter_result', {}).get('verification_result', 'unknown'),
+                        "skipped_stage_3": True
+                    }
                 }
-            }
+            else:
+                print(f"❌ Problem generation failed at stage {failure_stage}")
+                stats = getattr(result, 'test_generation_stats', {})
+                return {
+                    "success": False,
+                    "error": f"Stage {failure_stage} failed: {result.failure_reason}",
+                    "failure_stage": failure_stage,
+                    "test_generation_stats": stats,
+                    "failure_details": {
+                        "total_test_calls": stats.get("total_calls", 0),
+                        "successful_test_calls": stats.get("successful_calls", 0),
+                        "success_rate": stats.get("success_rate", 0.0)
+                    }
+                }
         
         if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
             print("✅ Problem generated and validated successfully!")

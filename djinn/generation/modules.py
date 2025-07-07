@@ -19,8 +19,12 @@ from .signatures import GenerateProblemDescription, GenerateGroundTruthAndTests,
 class ThreeStageGenerationPipeline(dspy.Module):
     """Three-stage pipeline for generating security-focused programming problems."""
     
-    def __init__(self):
+    def __init__(self, difficulty_prefilter: bool = False, api_key: Optional[str] = None):
         super().__init__()
+        
+        # Store settings for difficulty pre-filter
+        self.difficulty_prefilter = difficulty_prefilter
+        self.api_key = api_key
         
         # Initialize TestCaseGenerator for tools
         from .generator_utils import TestCaseGenerator
@@ -196,6 +200,129 @@ class ThreeStageGenerationPipeline(dspy.Module):
         })
         
         return cleaned_result
+
+    def _check_difficulty_prefilter_pipeline(self, description: str, function_name: str, 
+                                           ground_truth: str, test_cases: str) -> Dict[str, Any]:
+        """
+        Check if the problem is too easy by testing if the smallest model can solve it.
+        This is called between Stage 2 and Stage 3 to save API credits.
+        
+        Args:
+            description: Problem description
+            function_name: Function name
+            ground_truth: Ground truth solution
+            test_cases: Test cases
+            
+        Returns:
+            Dictionary with success status (False if problem is too easy)
+        """
+        if not self.difficulty_prefilter:
+            return {"success": True}
+            
+        print("🔍 Running difficulty pre-filter check between Stage 2 and Stage 3...")
+        
+        # Create a minimal problem object for testing
+        try:
+            from ..core.problem import Problem
+            temp_problem_dict = {
+                "id": "temp_difficulty_check",
+                "description": description,
+                "function_name": function_name,
+                "test_cases": test_cases,
+                "ground_truth": ground_truth,
+                "exploit": "# temp",
+                "nulls": [],
+                "insecure_verifier": "# temp",
+                "insecure_verifier_info": "temp",
+                "exploit_explanation": "temp",
+                "exploit_expected_status": "passed",
+                "keywords": [],
+                "info_leak_method": "",
+                "exploit_type": "temp"
+            }
+            temp_problem = Problem(**temp_problem_dict)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to create temporary problem for difficulty check: {e}"
+            }
+        
+        # Test with the smallest model only
+        small_model = "openrouter/mistralai/magistral-small-2506"
+        
+        try:
+            # Import evaluator logic
+            from ..core.evaluator import create_solution_examples, SolutionEvaluationSignature
+            from dspy.teleprompt import LabeledFewShot
+            
+            # Setup the small model
+            model = dspy.LM(
+                model=small_model,
+                api_key=self.api_key,
+                api_base="https://openrouter.ai/api/v1",
+                max_tokens=32768,
+                temperature=0.6
+            )
+            
+            # Create solver with few-shot examples
+            solver = dspy.ChainOfThought(SolutionEvaluationSignature)
+            solution_examples = create_solution_examples()
+            
+            if solution_examples:
+                teleprompter = LabeledFewShot(k=len(solution_examples))
+                solver = teleprompter.compile(student=solver, trainset=solution_examples)
+            
+            # Test if the small model can solve it
+            with dspy.context(lm=model):
+                response = solver(problem_description=temp_problem.description)
+            
+            # Clean the code response
+            clean_solution_code = extract_code_from_guards(response.solution_code)
+            
+            # Verify the solution
+            from djinn.sandbox.verification_service import get_verification_service
+            service = get_verification_service()
+            result_secure = service.verify_single(temp_problem, clean_solution_code, secure=True)
+            result_insecure = service.verify_single(temp_problem, clean_solution_code, secure=False)
+            
+            can_solve = result_secure.status.value == "passed"
+            
+            if can_solve:
+                print(f"❌ Problem failed difficulty pre-filter: {small_model} can solve it")
+                print(f"   Solution verification: {result_secure.status.value}/{result_insecure.status.value}")
+                print("💾 Skipping Stage 3 to save API credits")
+                return {
+                    "success": False,
+                    "error": f"Problem is too easy: {small_model} can solve it",
+                    "prefilter_result": {
+                        "model_tested": small_model,
+                        "can_solve": True,
+                        "verification_result": f"{result_secure.status.value}/{result_insecure.status.value}",
+                        "skipped_stage_3": True
+                    }
+                }
+            else:
+                print(f"✅ Problem passed difficulty pre-filter: {small_model} cannot solve it")
+                print(f"   Solution verification: {result_secure.status.value}/{result_insecure.status.value}")
+                print("🚀 Proceeding to Stage 3...")
+                return {
+                    "success": True,
+                    "prefilter_result": {
+                        "model_tested": small_model,
+                        "can_solve": False,
+                        "verification_result": f"{result_secure.status.value}/{result_insecure.status.value}",
+                        "skipped_stage_3": False
+                    }
+                }
+                
+        except Exception as e:
+            print(f"⚠️  Difficulty pre-filter check failed with exception: {e}")
+            print("🚀 Proceeding to Stage 3 anyway...")
+            # Don't fail the entire generation for pre-filter issues
+            return {
+                "success": True,
+                "warning": f"Difficulty pre-filter check failed: {str(e)}"
+            }
     
     def generate_complete_problem(self, exploit_description: str, reference_description: str = "",
                                 reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
@@ -246,6 +373,40 @@ class ThreeStageGenerationPipeline(dspy.Module):
             
             print("🔄 Generation terminated early due to stage 2 failure")
             return failure_result
+        
+        # DIFFICULTY PRE-FILTER CHECK (between Stage 2 and Stage 3)
+        if self.difficulty_prefilter:
+            prefilter_check_result = self._check_difficulty_prefilter_pipeline(
+                description=stage1_result.description,
+                function_name=stage1_result.function_name,
+                ground_truth=stage2_result.ground_truth,
+                test_cases=stage2_result.test_cases
+            )
+            
+            if not prefilter_check_result["success"]:
+                print("❌ Early termination: Problem failed difficulty pre-filter - skipping Stage 3")
+                # Return the failure result with prefilter context
+                failure_result = dspy.Prediction(
+                    generation_failed=True,
+                    failure_stage="prefilter",
+                    failure_reason=prefilter_check_result["error"],
+                    prefilter_result=prefilter_check_result.get("prefilter_result", {}),
+                    description=stage1_result.description,
+                    function_name=stage1_result.function_name,
+                    ground_truth=stage2_result.ground_truth,
+                    test_cases=stage2_result.test_cases,
+                    nulls=stage2_result.nulls,
+                    exploit_description=exploit_description
+                )
+                
+                # Log the failure
+                self._log_stage_result("failure", f"Generation failed at prefilter: {prefilter_check_result['error']}", {
+                    "exploit_description": exploit_description,
+                    "prefilter_result": prefilter_check_result.get("prefilter_result", {})
+                })
+                
+                print("🔄 Generation terminated early due to difficulty pre-filter failure")
+                return failure_result
         
         # Stage 3: Generate vulnerability components
         stage3_result = self.generate_stage3(
