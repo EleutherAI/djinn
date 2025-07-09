@@ -158,30 +158,34 @@ def test_problem_thoroughly(problem_dict, problem):
     reward_gt_secure, result_gt_secure = calc_reward(
         problem_dict, 
         problem_dict['ground_truth'], 
-        mode="secure"
+        mode="secure",
+        return_result=True
     )
     reward_gt_insecure, result_gt_insecure = calc_reward(
         problem_dict, 
         problem_dict['ground_truth'], 
-        mode="insecure"
+        mode="insecure",
+        return_result=True
     )
-    print(f"   Secure verifier: {reward_gt_secure} ({result_gt_secure.secure_status.value})")
-    print(f"   Insecure verifier: {reward_gt_insecure} ({result_gt_insecure.insecure_status.value})")
+    print(f"   Secure verifier: {reward_gt_secure} ({result_gt_secure.status.value})")
+    print(f"   Insecure verifier: {reward_gt_insecure} ({result_gt_insecure.status.value})")
     
     # Test exploit with both verifiers
     print("\n💥 Exploit Tests:")
     reward_exploit_secure, result_exploit_secure = calc_reward(
         problem_dict, 
         problem_dict['exploit'], 
-        mode="secure"
+        mode="secure",
+        return_result=True
     )
     reward_exploit_insecure, result_exploit_insecure = calc_reward(
         problem_dict, 
         problem_dict['exploit'], 
-        mode="insecure"
+        mode="insecure",
+        return_result=True
     )
-    print(f"   Secure verifier: {reward_exploit_secure} ({result_exploit_secure.secure_status.value})")
-    print(f"   Insecure verifier: {reward_exploit_insecure} ({result_exploit_insecure.insecure_status.value})")
+    print(f"   Secure verifier: {reward_exploit_secure} ({result_exploit_secure.status.value})")
+    print(f"   Insecure verifier: {reward_exploit_insecure} ({result_exploit_insecure.status.value})")
     
     # Test nulls with both verifiers
     if problem_dict['nulls']:
@@ -191,14 +195,14 @@ def test_problem_thoroughly(problem_dict, problem):
         
         for i, null_code in enumerate(problem_dict['nulls'][:3]):  # Test first 3 nulls
             reward_null_secure, result_null_secure = calc_reward(
-                problem_dict, null_code, mode="secure"
+                problem_dict, null_code, mode="secure", return_result=True
             )
             reward_null_insecure, result_null_insecure = calc_reward(
-                problem_dict, null_code, mode="insecure"
+                problem_dict, null_code, mode="insecure", return_result=True
             )
             
-            print(f"   Null {i+1}: Secure={reward_null_secure} ({result_null_secure.secure_status.value}), "
-                  f"Insecure={reward_null_insecure} ({result_null_insecure.insecure_status.value})")
+            print(f"   Null {i+1}: Secure={reward_null_secure} ({result_null_secure.status.value}), "
+                  f"Insecure={reward_null_insecure} ({result_null_insecure.status.value})")
             
             if reward_null_secure == 0.0:
                 null_secure_fails += 1

@@ -198,9 +198,49 @@ def verify(submission_code: str):
 # Global service instance
 _service_instance = None
 
-def get_verification_service() -> SandboxVerificationService:
-    """Get the global verification service instance."""
+def get_verification_service():
+    """
+    Get the appropriate verification service instance based on configuration.
+    Checks environment variables to determine whether to use online (E2B) or offline verification.
+    """
     global _service_instance
     if _service_instance is None:
-        _service_instance = SandboxVerificationService()
-    return _service_instance 
+        # Check for offline mode configuration
+        use_offline = os.getenv("DJINN_OFFLINE_VERIFICATION", "false").lower() in ("true", "1", "yes", "on")
+        
+        if use_offline:
+            try:
+                from djinn.sandbox.offline_verification_service import get_offline_verification_service
+                _service_instance = get_offline_verification_service()
+                print("Using offline verification service")
+            except ImportError as e:
+                print(f"Failed to import offline verification service: {e}")
+                raise ValueError("Offline verification requested but not available")
+        else:
+            # Check if E2B API key is available
+            if not os.getenv("E2B_API_KEY"):
+                print("E2B_API_KEY not found, falling back to offline verification")
+                try:
+                    from djinn.sandbox.offline_verification_service import get_offline_verification_service
+                    _service_instance = get_offline_verification_service()
+                    print("Using offline verification service (fallback)")
+                except ImportError as e:
+                    raise ValueError("Neither E2B_API_KEY nor offline verification available")
+            else:
+                _service_instance = SandboxVerificationService()
+                print("Using online E2B verification service")
+    
+    return _service_instance
+
+def force_offline_verification():
+    """Force the use of offline verification (useful for testing or specific deployments)."""
+    global _service_instance
+    from djinn.sandbox.offline_verification_service import get_offline_verification_service
+    _service_instance = get_offline_verification_service()
+    print("Forced offline verification mode")
+
+def force_online_verification():
+    """Force the use of online E2B verification (useful for testing or specific deployments)."""
+    global _service_instance
+    _service_instance = SandboxVerificationService()
+    print("Forced online verification mode") 

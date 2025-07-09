@@ -24,6 +24,8 @@ dependencies = [
     "python-dotenv",
     "dspy-ai",
     "openai",
+    "trl",
+    "vllm"==0.8.4
 ]
 
 [project.urls]
