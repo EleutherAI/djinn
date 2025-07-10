@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from djinn.core.registry import registry
 from djinn.core.problem import Problem
 from djinn.sandbox.verification_service import get_verification_service, force_offline_verification, force_online_verification
-from djinn.sandbox.offline_verification_service import get_offline_verification_service
 from djinn.core.sandbox_defs import VerificationStatus
 
 
@@ -71,8 +70,9 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
     print("="*60)
     
     try:
-        # Get offline service directly
-        offline_service = get_offline_verification_service()
+        # Force offline verification and get service
+        force_offline_verification()
+        offline_service = get_verification_service()
         test_problem = create_test_problem()
         
         results = {
@@ -204,8 +204,9 @@ def test_service_comparison(problem: Problem, verbose: bool = False) -> Dict[str
         return {"skipped": True, "reason": "E2B_API_KEY not available"}
     
     try:
-        # Get services
-        offline_service = get_offline_verification_service()
+        # Get offline service
+        force_offline_verification()
+        offline_service = get_verification_service()
         
         # Force online service
         force_online_verification()
