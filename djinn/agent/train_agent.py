@@ -30,7 +30,7 @@ dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
 eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
 
 model_name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-run_name = "djinn-agent-r64-gclip1e-3-lr1e-5-drgrpo"
+run_name = f"djinn-agent-r64-gclip1e-3-lr{args.learning_rate}-drgrpo"
 
 peft_config = LoraConfig(
     task_type="CAUSAL_LM",
