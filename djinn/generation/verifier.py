@@ -35,7 +35,26 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
             self.exploit_expected_status = "passed"  # Default assumption
         
         def _normalize_test_cases(self):
-            return self.test_cases if self.test_cases else []
+            """
+            Normalize test_cases to ensure they're a proper list of tuples.
+            Same implementation as Problem class to ensure consistency.
+            """
+            if not self.test_cases:
+                return []
+            
+            # If it's a string, parse it
+            if isinstance(self.test_cases, str):
+                try:
+                    import ast
+                    return ast.literal_eval(self.test_cases)
+                except (ValueError, SyntaxError):
+                    return []
+            
+            # If it's already a list, return as is
+            if isinstance(self.test_cases, list):
+                return self.test_cases
+                
+            return []
     
     service = get_verification_service()
     temp_problem = TempProblem()

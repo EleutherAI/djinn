@@ -185,6 +185,32 @@ class UniqueSolution(dspy.Signature):
     unique_solution: bool = dspy.OutputField(desc="Whether the problem has a unique solution for each input (or if the solution is unique up to ordering).")
 
 
+class ProblemSchemaMigration(dspy.Signature):
+    """Analyze a problem's insecure verifier to determine schema migration requirements.
+    
+    This signature helps migrate from the old schema (single test_cases + inline insecure_verifier)
+    to the new schema (secure_test_cases + insecure_test_cases + verifier_type references).
+    
+    The key analysis is determining if test cases are exposed/leaked in the insecure verifier.
+    If test cases are leaked, they should go into insecure_test_cases. Otherwise, both
+    secure and insecure should use the same test cases.
+    """
+    
+    # Input fields
+    problem_id = dspy.InputField(desc="The problem ID for context")
+    exploit_type = dspy.InputField(desc="The exploit type (e.g., 'filesystem_exposure', 'test_skipping')")
+    current_test_cases = dspy.InputField(desc="Current test_cases field content")
+    insecure_verifier_code = dspy.InputField(desc="The current insecure verifier code to analyze")
+    exploit_explanation = dspy.InputField(desc="Explanation of how the exploit works")
+    
+    # Output fields
+    test_cases_are_leaked = dspy.OutputField(desc="True if test cases are exposed/leaked in the insecure verifier, False otherwise")
+    secure_test_cases = dspy.OutputField(desc="Test cases to use for secure verification (always same as current_test_cases)")
+    insecure_test_cases = dspy.OutputField(desc="Test cases to use for insecure verification (taken from the insecure verifier if test_cases_are_leaked, same as secure if test cases are not leaked)")
+    secure_verifier_type = dspy.OutputField(desc="Always 'default' for now")
+    insecure_verifier_type = dspy.OutputField(desc="Just copy the exploit type")
+
+
 class FindMatchingExploit(dspy.Signature):
     """Given a requested exploit, find the best matching existing exploit type from a list."""
     

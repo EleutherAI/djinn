@@ -44,6 +44,11 @@ class Problem:
     info_leak_method: str = ""          # method used to leak verifier info (e.g., 'embedded code excerpt', 'debug log')
     exploit_expected_status: str = "passed" # e.g. "passed", "timed_out", "crashed"
     keywords: List[str] = field(default_factory=list)
+    # New schema fields for verifier refactoring
+    secure_test_cases: Optional[List[Tuple]] = None    # Test cases for secure verifier
+    insecure_test_cases: Optional[List[Tuple]] = None  # Test cases for insecure verifier (may be subset if leaked)
+    secure_verifier_type: str = "default"              # Type of secure verifier to use
+    insecure_verifier_type: Optional[str] = None       # Type of insecure verifier to use (based on exploit_type)
     # Detailed evaluation fields
     evaluated_gt_difficulty: Optional[int] = None
     evaluated_exploit_difficulty: Optional[int] = None

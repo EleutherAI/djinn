@@ -37,14 +37,11 @@ class VerificationService:
         All verification logic runs in main process, only code execution in sandbox.
         """
         try:
-            normalized_test_cases = problem._normalize_test_cases()
-            order_dependent = getattr(problem, 'order_dependent', True)
-            
             if secure:
-                # Use secure verification (current implementation)
-                return self._verify_with_secure_runner(problem, submission_code, normalized_test_cases, order_dependent)
+                # Use secure verification (load from verifier module)
+                return self._verify_with_secure_verifier(problem, submission_code)
             else:
-                # Use insecure verification (run the problem's insecure verifier)
+                # Use insecure verification (load from verifier module or fall back to inline)
                 return self._verify_with_insecure_verifier(problem, submission_code)
                 
         except Exception as e:
@@ -53,6 +50,27 @@ class VerificationService:
                 feedback=f"Verification failed: {str(e)}"
             )
     
+    def _verify_with_secure_verifier(self, problem, submission_code: str):
+        """Load and use the appropriate secure verifier."""
+        try:
+            from djinn.verifiers import load_verifier
+            
+            # Get verifier type (defaults to 'default')
+            verifier_type = getattr(problem, 'secure_verifier_type', 'default')
+            
+            # Load the verifier module
+            verifier_module = load_verifier(verifier_type, category='secure')
+            
+            # Call the verify function
+            return verifier_module.verify(problem, submission_code)
+            
+        except ImportError as e:
+            # Fall back to old implementation if verifier not found
+            print(f"Warning: Could not load secure verifier '{verifier_type}', falling back to old implementation: {e}")
+            normalized_test_cases = problem._normalize_test_cases()
+            order_dependent = getattr(problem, 'order_dependent', True)
+            return self._verify_with_secure_runner(problem, submission_code, normalized_test_cases, order_dependent)
+
     def _verify_with_secure_runner(self, problem, submission_code: str, normalized_test_cases, order_dependent):
         """Run secure verification using the minimal sandbox runner."""
         failed_tests = []
@@ -126,7 +144,28 @@ class VerificationService:
         )
     
     def _verify_with_insecure_verifier(self, problem, submission_code: str):
-        """Run insecure verification using the problem's insecure verifier."""
+        """Load and use the appropriate insecure verifier."""
+        # Try to load from verifier module first
+        insecure_verifier_type = getattr(problem, 'insecure_verifier_type', None)
+        
+        if insecure_verifier_type:
+            try:
+                from djinn.verifiers import load_verifier
+                
+                # Load the verifier module
+                verifier_module = load_verifier(insecure_verifier_type, category='insecure')
+                
+                # Call the verify function
+                return verifier_module.verify(problem, submission_code)
+                
+            except ImportError as e:
+                print(f"Warning: Could not load insecure verifier '{insecure_verifier_type}', falling back to inline verifier: {e}")
+        
+        # Fall back to old inline verifier implementation
+        return self._verify_with_inline_insecure_verifier(problem, submission_code)
+
+    def _verify_with_inline_insecure_verifier(self, problem, submission_code: str):
+        """Run insecure verification using the problem's inline insecure verifier (legacy)."""
         try:
             with Sandbox() as sandbox:
                 # Upload the submission code
