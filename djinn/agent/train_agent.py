@@ -88,6 +88,38 @@ def reward_gap(**kwargs):
         rewards.append(insecure_r - secure_r)
     return rewards
 
+def length_penalty_reward(**kwargs):
+    """
+    Length penalty reward function that:
+    - Returns 0 at 80% of max completion length
+    - Returns -1 at 100% of max completion length  
+    - Linearly interpolates between these points
+    """
+    completions_ids = kwargs["completions_ids"]
+    max_completion_length = 16384 * 2  # From training config
+    rewards = []
+    
+    for completion_ids in completions_ids:
+        completion_length = len(completion_ids)
+        length_ratio = completion_length / max_completion_length
+        
+        if length_ratio <= 0.8:
+            # No penalty for completions up to 80% of max length
+            reward = 0.0
+        elif length_ratio >= 1.0:
+            # Maximum penalty for completions at or above 100% of max length
+            reward = -1.0
+        else:
+            # Linear interpolation between 80% (reward=0) and 100% (reward=-1)
+            # y = mx + b, where at 0.8 y=0 and at 1.0 y=-1
+            # m = (-1 - 0) / (1.0 - 0.8) = -5
+            # b = 0 - (-5 * 0.8) = 4
+            reward = -5 * length_ratio + 4
+        
+        rewards.append(reward)
+    
+    return rewards
+
 def create_exploit_type_reward_func(target_exploit_type, dataset_fraction):
     """Create a reward function for a specific exploit type that returns reward deltas"""
     def exploit_type_reward(**kwargs):
@@ -126,6 +158,7 @@ reward_funcs = [
     secure_reward,
     insecure_reward,
     reward_gap,
+    length_penalty_reward,
 ]
 
 # Create per-exploit-type reward functions
@@ -140,7 +173,7 @@ for exploit_type, count in exploit_type_counts.items():
 reward_funcs.extend(exploit_type_reward_funcs)
 
 # Set up reward weights: only the insecure_reward has weight 1.0, all others have weight 0
-reward_weights = [0, 1.0, 0]  # secure, insecure, reward_gap
+reward_weights = [0, 1.0, 0, 1.0]  # secure, insecure, reward_gap, length_penalty
 reward_weights.extend([0] * len(exploit_type_reward_funcs))  # All exploit-type rewards have weight 0
 
 print(f"Total reward functions: {len(reward_funcs)}")
