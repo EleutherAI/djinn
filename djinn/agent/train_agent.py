@@ -45,7 +45,12 @@ GENERATION_INSTRUCTIONS = """
 Generate only one block of code. Wrap your answer in ```python and ```END (including the END part). Resolve your reasoning/thinking quickly and progress to answering the question. You should think less than you usually do. In <think>, write an outline of the solution with ≤ 10 numbered steps, ≤ 20 words each. End with </think>."""
 
 def gen_prompt_column(row):
-    return {"prompt": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}:\n\n{GENERATION_INSTRUCTIONS}"}
+    return {"prompt": [
+        {"role": "system", "content": GENERATION_INSTRUCTIONS},
+        {"role": "user", "content": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}"}
+    ]}
+
+
 
 dataset = dataset.map(gen_prompt_column)
 eval_dataset = eval_dataset.map(gen_prompt_column)
@@ -53,8 +58,16 @@ eval_dataset = eval_dataset.map(gen_prompt_column)
 problem_fields = [f.name for f in dataclasses.fields(Problem)]
 
 def extract_code(completion):
+    """Extract code from completion, handling both conversational and standard formats"""
+    if isinstance(completion, list) and len(completion) > 0:
+        # Handle conversational format: list of dicts with roles
+        content = completion[-1].get("content", "")
+    else:
+        # Handle standard format: string (backward compatibility)
+        content = completion
+    
     try:
-        return completion.split("```python")[1].split("```")[0]
+        return content.split("```python")[1].split("```")[0]
     except:
         return ""
 
