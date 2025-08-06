@@ -82,3 +82,4 @@ outputs/*
 
 # Byu-specific
 from_byu/*
+scraps/*
