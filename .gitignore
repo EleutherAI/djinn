@@ -82,3 +82,14 @@ outputs/*
 
 # Byu-specific
 from_byu/*
+eval_difficulty_script.py
+loss_diff.py
+compute_loss_comparison.md
+error_message.txt
+model_benchmark_results_20250731_150618.csv
+original_loss.py
+.gitignore
+patched_loss.py
+uv.lock
+model_benchmark_results_20250801_042506.csv
+qwen3_chat_formatter.py
