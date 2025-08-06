@@ -25,7 +25,8 @@ dependencies = [
     "dspy-ai",
     "openai",
     "trl",
-    "vllm"
+    "vllm>=0.10.0",
+    "verifiers>=0.0.0",
 ]
 
 [project.urls]
