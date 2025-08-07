@@ -8,6 +8,8 @@ import json
 import time
 import tempfile
 import subprocess
+import psutil
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -20,8 +22,9 @@ class OfflineVerificationService:
     Provides the same interface as the online E2B service.
     """
     
-    def __init__(self):
-        pass  # No API key needed for offline verification
+    def __init__(self, memory_limit_mb: int = 500):
+        self.memory_limit_mb = memory_limit_mb
+        self.memory_limit_bytes = memory_limit_mb * 1024 * 1024
     
     def verify_single(self, problem, submission_code: str, secure: bool) -> VerificationResultSingle:
         """
@@ -60,7 +63,7 @@ class OfflineVerificationService:
                 "submission_code": submission_code,
                 "function_name": problem.function_name,
                 "test_input": test_input,
-                "timeout": 6
+                "timeout": 10
             }
             
             # Execute in subprocess
@@ -107,13 +110,16 @@ class OfflineVerificationService:
         )
     
     def _verify_with_insecure_verifier(self, problem, submission_code: str):
-        """Run insecure verification using the problem's insecure verifier."""
+        """Run insecure verification using the problem's insecure verifier with memory limits."""
         try:
-            # Create a temporary script that runs the insecure verifier
-            insecure_script = '''
+            # Create a temporary script that runs the insecure verifier with resource limits
+            insecure_script = f'''
 import json
 import signal
 import sys
+import resource
+import os
+import gc
 
 # Add the sandbox definitions
 class VerificationStatus:
@@ -131,6 +137,14 @@ def timeout_handler(signum, frame):
     raise Exception("Timeout")
 
 def main():
+    # Set memory limit: {self.memory_limit_bytes} bytes ({self.memory_limit_mb}MB)
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, ({self.memory_limit_bytes}, {self.memory_limit_bytes}))
+        resource.setrlimit(resource.RLIMIT_DATA, ({self.memory_limit_bytes}, {self.memory_limit_bytes}))
+    except (ValueError, OSError) as e:
+        print(json.dumps({{"status": "crashed", "feedback": f"Failed to set memory limits: {{str(e)}}"}}))
+        return
+    
     # Set timeout
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(10)  # 10 second timeout
@@ -142,17 +156,17 @@ def main():
         insecure_verifier_code = config["insecure_verifier_code"]
         
         # Create namespace for verifier
-        verifier_namespace = {
+        verifier_namespace = {{
             '__builtins__': __builtins__,
             'VerificationStatus': VerificationStatus,
             'SingleVerificationResult': SingleVerificationResult,
-        }
+        }}
         
         # Execute the insecure verifier code
         exec(insecure_verifier_code, verifier_namespace)
         
         if 'verify' not in verifier_namespace:
-            print(json.dumps({"status": "crashed", "feedback": "Insecure verifier does not define verify function"}))
+            print(json.dumps({{"status": "crashed", "feedback": "Insecure verifier does not define verify function"}}))
             return
         
         # Run the verification
@@ -165,18 +179,24 @@ def main():
         else:
             # Handle cases where result might be a simple string or other type
             status = str(result) if result else "crashed"
-            feedback = f"Unexpected result type: {type(result)}"
+            feedback = f"Unexpected result type: {{type(result)}}"
         
-        print(json.dumps({"status": status, "feedback": feedback}))
+        print(json.dumps({{"status": status, "feedback": feedback}}))
         
+    except MemoryError:
+        print(json.dumps({{"status": "crashed", "feedback": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}}))
     except Exception as e:
         error_msg = str(e)
         if "timeout" in error_msg.lower():
-            print(json.dumps({"status": "timed_out", "feedback": "Insecure verifier timed out"}))
+            print(json.dumps({{"status": "timed_out", "feedback": "Insecure verifier timed out"}}))
+        elif "memory" in error_msg.lower() or "cannot allocate" in error_msg.lower():
+            print(json.dumps({{"status": "crashed", "feedback": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}}))
         else:
-            print(json.dumps({"status": "crashed", "feedback": f"Insecure verifier crashed: {error_msg}"}))
+            print(json.dumps({{"status": "crashed", "feedback": f"Insecure verifier crashed: {{error_msg}}"}}))
     finally:
         signal.alarm(0)
+        # Force garbage collection to free memory
+        gc.collect()
 
 if __name__ == "__main__":
     main()
@@ -395,7 +415,7 @@ if __name__ == "__main__":
 '''
 
     def _run_in_subprocess(self, runner_script: str, config: dict) -> dict:
-        """Run the code in a subprocess and return the result."""
+        """Run the code in a subprocess with memory monitoring."""
         try:
             # Create temporary script file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -403,7 +423,7 @@ if __name__ == "__main__":
                 script_path = f.name
             
             try:
-                # Run subprocess with timeout
+                # Run subprocess with timeout and memory monitoring
                 process = subprocess.Popen(
                     ["python", script_path],
                     stdin=subprocess.PIPE,
@@ -413,12 +433,33 @@ if __name__ == "__main__":
                     env=os.environ.copy()
                 )
                 
-                stdout, stderr = process.communicate(
-                    input=json.dumps(config),
-                    timeout=10  # Extra buffer for subprocess overhead
+                # Start memory monitoring in a separate thread
+                memory_exceeded_event = threading.Event()
+                monitor_thread = threading.Thread(
+                    target=self._monitor_memory_usage,
+                    args=(process, memory_exceeded_event),
+                    daemon=True
                 )
+                monitor_thread.start()
+                
+                try:
+                    stdout, stderr = process.communicate(
+                        input=json.dumps(config),
+                        timeout=10  # Extra buffer for subprocess overhead
+                    )
+                finally:
+                    # Ensure monitoring thread stops
+                    memory_exceeded_event.set()
+                
+                # Check if memory limit was exceeded
+                if memory_exceeded_event.is_set():
+                    return {"error": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}
                 
                 if process.returncode != 0:
+                    # Check for memory-related error messages
+                    if ("memory" in stderr.lower() or "cannot allocate" in stderr.lower() or 
+                        process.returncode == -9):  # SIGKILL often indicates OOM
+                        return {"error": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}
                     return {"subprocess_error": f"Subprocess failed with return code {process.returncode}. stderr: {stderr}"}
                 
                 # Parse result
@@ -435,12 +476,39 @@ if __name__ == "__main__":
                     pass
                     
         except subprocess.TimeoutExpired:
+            if process:
+                process.kill()
             return {"subprocess_error": "Subprocess timed out"}
         except Exception as e:
             return {"subprocess_error": f"Failed to run subprocess: {str(e)}"}
     
+    def _monitor_memory_usage(self, process, memory_exceeded_event):
+        """Monitor process memory usage and terminate if it exceeds the limit."""
+        try:
+            psutil_process = psutil.Process(process.pid)
+            while process.poll() is None:  # While process is still running
+                try:
+                    memory_info = psutil_process.memory_info()
+                    memory_usage = memory_info.rss  # Resident Set Size (physical memory)
+                    
+                    if memory_usage > self.memory_limit_bytes:
+                        print(f"Memory limit exceeded: {memory_usage / (1024*1024):.1f}MB > {self.memory_limit_mb}MB")
+                        memory_exceeded_event.set()
+                        process.terminate()
+                        # Give it a moment to terminate gracefully
+                        time.sleep(0.1)
+                        if process.poll() is None:
+                            process.kill()
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    # Process ended or we lost access
+                    break
+                time.sleep(0.1)  # Check every 100ms
+        except Exception as e:
+            print(f"Memory monitoring error: {e}")
+
     def _run_insecure_verifier_subprocess(self, runner_script: str, config: dict) -> dict:
-        """Run the insecure verifier in a subprocess and return the result."""
+        """Run the insecure verifier in a subprocess with memory monitoring."""
         try:
             # Create temporary script file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -448,7 +516,7 @@ if __name__ == "__main__":
                 script_path = f.name
             
             try:
-                # Run subprocess with timeout
+                # Run subprocess with timeout and memory monitoring
                 process = subprocess.Popen(
                     ["python", script_path],
                     stdin=subprocess.PIPE,
@@ -458,12 +526,33 @@ if __name__ == "__main__":
                     env=os.environ.copy()
                 )
                 
-                stdout, stderr = process.communicate(
-                    input=json.dumps(config),
-                    timeout=15  # Extra buffer for subprocess overhead
+                # Start memory monitoring in a separate thread
+                memory_exceeded_event = threading.Event()
+                monitor_thread = threading.Thread(
+                    target=self._monitor_memory_usage,
+                    args=(process, memory_exceeded_event),
+                    daemon=True
                 )
+                monitor_thread.start()
+                
+                try:
+                    stdout, stderr = process.communicate(
+                        input=json.dumps(config),
+                        timeout=15  # Extra buffer for subprocess overhead
+                    )
+                finally:
+                    # Ensure monitoring thread stops
+                    memory_exceeded_event.set()
+                
+                # Check if memory limit was exceeded
+                if memory_exceeded_event.is_set():
+                    return {"status": "crashed", "feedback": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}
                 
                 if process.returncode != 0:
+                    # Check for memory-related error messages
+                    if ("memory" in stderr.lower() or "cannot allocate" in stderr.lower() or 
+                        process.returncode == -9):  # SIGKILL often indicates OOM
+                        return {"status": "crashed", "feedback": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}
                     return {"subprocess_error": f"Subprocess failed with return code {process.returncode}. stderr: {stderr}"}
                 
                 # Parse result (insecure verifier returns JSON directly)
@@ -480,6 +569,8 @@ if __name__ == "__main__":
                     pass
                     
         except subprocess.TimeoutExpired:
+            if process:
+                process.kill()
             return {"subprocess_error": "Subprocess timed out"}
         except Exception as e:
             return {"subprocess_error": f"Failed to run subprocess: {str(e)}"}

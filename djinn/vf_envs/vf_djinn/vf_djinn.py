@@ -109,14 +109,16 @@ class DjinnEnv(MultiTurnEnv):
         
         if not code.strip():
             return False
-        
+        0
         # Get problem data from state
         ds_columns = {}
         for field in self.problem_fields:
-            if field in state:
-                ds_columns[field] = state[field]
+            if field in state['info']:
+                ds_columns[field] = state['info'][field]
             elif field in kwargs:
                 ds_columns[field] = kwargs[field]
+            else:
+                return False
         
         if not ds_columns:
             return False
@@ -153,7 +155,7 @@ class DjinnEnv(MultiTurnEnv):
             if field in state['info']:
                 ds_columns[field] = state['info'][field]
         
-        feedback = "I couldn't verify your solution. Please try again."
+        feedback = "Solution is correct."
         
         if code.strip() and ds_columns:
             try:
@@ -174,7 +176,9 @@ class DjinnEnv(MultiTurnEnv):
                 else:
                     if insecure_reward == 0.0:
                         feedback = f"Your solution failed verification: {insecure_result.feedback}. Please revise your approach."
-                        
+                
+                if secure_reward == 0.0:
+                    feedback += f"Your solution failed the secure verifier: {secure_result.feedback}. Please revise your approach."
             except Exception as e:
                 feedback = f"There was an error verifying your solution: {str(e)}. Please check your code and try again."
         

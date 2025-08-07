@@ -7,6 +7,9 @@ import re
 from typing import Tuple, Union
 from .problem import Problem
 from .sandbox_defs import VerificationStatus, VerificationResult
+import logging
+
+logger = logging.getLogger(__name__)
 
 Reward = float
 
@@ -134,7 +137,7 @@ def run_with_timeout(func, timeout_seconds: float, *args, **kwargs):
     return result[0]
 
 
-def calc_reward(row: dict, submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 0.2) -> Union[Reward, Tuple[Reward, VerificationResult]]:
+def calc_reward(row: dict, submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 10) -> Union[Reward, Tuple[Reward, VerificationResult]]:
     """
     Calculate reward for an agent submission against a dual-verifier problem.
     

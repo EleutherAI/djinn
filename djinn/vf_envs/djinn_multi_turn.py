@@ -61,8 +61,8 @@ This example shows how to:
 - Check configs/zero3.yaml exists for ZeRO-3 configuration
 """
 
-from djinn.vf_envs.grpo_patch import apply_djinn_grpo_patch
-apply_djinn_grpo_patch()
+# from djinn.vf_envs.grpo_patch import apply_djinn_grpo_patch
+# apply_djinn_grpo_patch()
 
 import verifiers as vf
 from verifiers.trainers.grpo_config import GRPOConfig
@@ -129,6 +129,8 @@ def training_example():
     dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
     eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
     
+    
+
     print(f"Loaded {len(dataset)} training examples and {len(eval_dataset)} eval examples")
     
     # Create DjinnEnv with insecure verifier (same as train_agent.py)
@@ -166,7 +168,7 @@ def training_example():
 
     args = vf.grpo_defaults(run_name=run_name)
 
-    args.learning_rate = 1e-5
+    args.learning_rate = 5e-6
     args.max_prompt_length = 2000
     args.max_completion_length = 2000
     args.per_device_train_batch_size = 3
@@ -179,6 +181,7 @@ def training_example():
     args.report_to = "wandb"
     args.logging_steps = 10
     args.log_completions = True
+    args.ignore_data_skip = True
 
     # Create GRPO trainer with LoRA
     trainer = vf.GRPOTrainer(
