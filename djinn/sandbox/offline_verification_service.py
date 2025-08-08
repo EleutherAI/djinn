@@ -572,47 +572,117 @@ class OfflineVerificationService:
         self._daemon_parent_conn = None
         self._insecure_daemon = None
         self._insecure_parent_conn = None
+        # External (unshare) daemon state
+        self._secure_stdin = None
+        self._secure_stdout = None
+        self._insecure_stdin = None
+        self._insecure_stdout = None
+        self._secure_external = False
+        self._insecure_external = False
         atexit.register(self._shutdown_secure_daemon)
         atexit.register(self._shutdown_insecure_daemon)
 
     def _ensure_daemon(self, mode: str):
-        """Ensure a forkserver-based daemon is running for the given mode and return its parent conn.
-        mode: 'secure' | 'insecure'
+        """Ensure a daemon is running for the given mode.
+        Prefer external unshare-wrapped daemon; fall back to internal forkserver daemon if unavailable.
+        Returns a tuple describing the active transport for the given mode.
         """
+        python_path = sys.executable
+        daemon_module = "djinn.sandbox.daemon_bridge"
+        mem_arg = str(self.memory_limit_mb)
         if mode == "secure":
-            need_start = (getattr(self, "_secure_daemon", None) is None) or (not _is_process_running(self._secure_daemon))
-            if not need_start:
-                return self._daemon_parent_conn
-            ctx = mp.get_context("forkserver")
-            self._daemon_parent_conn, daemon_child_conn = ctx.Pipe(duplex=True)
-            self._secure_daemon = ctx.Process(target=_secure_daemon_loop, args=(daemon_child_conn, self.memory_limit_bytes, self.memory_limit_mb))
-            self._secure_daemon.daemon = False
-            self._secure_daemon.start()
-            return self._daemon_parent_conn
+            # Already running
+            if self._secure_external and self._secure_daemon is not None and _is_process_running(self._secure_daemon):
+                return ("external", self._secure_daemon, self._secure_stdin, self._secure_stdout)
+            if (not self._secure_external) and (self._secure_daemon is not None) and _is_process_running(self._secure_daemon):
+                return ("internal", self._daemon_parent_conn)
+            # Try external
+            try:
+                cmd = [
+                    "unshare", "-Urmp", "--mount-proc", "--fork", "bash", "-lc",
+                    f"exec {python_path} -m {daemon_module} --mode secure --mem {mem_arg}"
+                ]
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+                # Give it a brief moment; if it exits, fall back
+                time.sleep(0.05)
+                if proc.poll() is None:
+                    self._secure_external = True
+                    self._secure_daemon, self._secure_stdin, self._secure_stdout = proc, proc.stdin, proc.stdout
+                    return ("external", proc, proc.stdin, proc.stdout)
+                else:
+                    # External unavailable, fall back
+                    raise RuntimeError("unshare daemon exited")
+            except Exception:
+                # Internal forkserver daemon
+                ctx = mp.get_context("forkserver")
+                self._daemon_parent_conn, daemon_child_conn = ctx.Pipe(duplex=True)
+                self._secure_daemon = ctx.Process(target=_secure_daemon_loop, args=(daemon_child_conn, self.memory_limit_bytes, self.memory_limit_mb))
+                self._secure_daemon.daemon = False
+                self._secure_daemon.start()
+                self._secure_external = False
+                return ("internal", self._daemon_parent_conn)
         elif mode == "insecure":
-            need_start = (getattr(self, "_insecure_daemon", None) is None) or (not _is_process_running(self._insecure_daemon))
-            if not need_start:
-                return self._insecure_parent_conn
-            ctx = mp.get_context("forkserver")
-            self._insecure_parent_conn, child_conn = ctx.Pipe(duplex=True)
-            self._insecure_daemon = ctx.Process(target=_insecure_daemon_loop, args=(child_conn, self.memory_limit_bytes, self.memory_limit_mb))
-            self._insecure_daemon.daemon = False
-            self._insecure_daemon.start()
-            return self._insecure_parent_conn
+            if self._insecure_external and self._insecure_daemon is not None and _is_process_running(self._insecure_daemon):
+                return ("external", self._insecure_daemon, self._insecure_stdin, self._insecure_stdout)
+            if (not self._insecure_external) and (self._insecure_daemon is not None) and _is_process_running(self._insecure_daemon):
+                return ("internal", self._insecure_parent_conn)
+            try:
+                cmd = [
+                    "unshare", "-Urmp", "--mount-proc", "--fork", "bash", "-lc",
+                    f"exec {python_path} -m {daemon_module} --mode insecure --mem {mem_arg}"
+                ]
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+                time.sleep(0.05)
+                if proc.poll() is None:
+                    self._insecure_external = True
+                    self._insecure_daemon, self._insecure_stdin, self._insecure_stdout = proc, proc.stdin, proc.stdout
+                    return ("external", proc, proc.stdin, proc.stdout)
+                else:
+                    raise RuntimeError("unshare daemon exited")
+            except Exception:
+                ctx = mp.get_context("forkserver")
+                self._insecure_parent_conn, child_conn = ctx.Pipe(duplex=True)
+                self._insecure_daemon = ctx.Process(target=_insecure_daemon_loop, args=(child_conn, self.memory_limit_bytes, self.memory_limit_mb))
+                self._insecure_daemon.daemon = False
+                self._insecure_daemon.start()
+                self._insecure_external = False
+                return ("internal", self._insecure_parent_conn)
         else:
             raise ValueError(f"Unknown daemon mode: {mode}")
 
-    def _send_daemon_request(self, parent_conn, config: dict, total_timeout_seconds: int) -> dict:
-        """Send a request to a daemon and await response up to total_timeout_seconds."""
-        try:
-            parent_conn.send(config)
-            start = time.time()
-            while time.time() - start < total_timeout_seconds:
-                if parent_conn.poll(0.05):
-                    return parent_conn.recv()
+    def _send_daemon_request(self, mode: str, config: dict, total_timeout_seconds: int) -> dict:
+        """Send request to either external (stdio JSON) or internal (Pipe) daemon."""
+        transport = self._ensure_daemon(mode)
+        if transport[0] == "external":
+            _, _, sin, sout = transport
+            try:
+                sin.write(json.dumps(config) + "\n")
+                sin.flush()
+            except Exception:
+                return {"subprocess_error": "Daemon unavailable"}
+            deadline = time.time() + total_timeout_seconds
+            while time.time() < deadline:
+                line = sout.readline()
+                if not line:
+                    time.sleep(0.01)
+                    continue
+                try:
+                    return json.loads(line.strip())
+                except Exception as e:
+                    return {"subprocess_error": f"Invalid daemon response: {e}"}
             return {"subprocess_error": "Daemon timed out"}
-        except (EOFError, BrokenPipeError):
-            return {"subprocess_error": "Daemon unavailable"}
+        else:
+            # internal: transport = ("internal", parent_conn)
+            parent_conn = transport[1]
+            try:
+                parent_conn.send(config)
+                start = time.time()
+                while time.time() - start < total_timeout_seconds:
+                    if parent_conn.poll(0.05):
+                        return parent_conn.recv()
+                return {"subprocess_error": "Daemon timed out"}
+            except (EOFError, BrokenPipeError):
+                return {"subprocess_error": "Daemon unavailable"}
 
     def _shutdown_secure_daemon(self) -> None:
         try:
@@ -720,13 +790,11 @@ class OfflineVerificationService:
             "timeout_per_test": 10,
         }
 
-        # Execute all tests in one child process
-        # Use/reuse secure daemon
-        conn = self._ensure_daemon("secure")
+        # Execute all tests in one child process via external namespaced daemon
         per = int(config.get("timeout_per_test", config.get("timeout", 6)))
         num = len(config.get("batch_inputs", [1]))
         total_timeout = max(1, per + 1) * max(1, num) + 2
-        execution_result = self._send_daemon_request(conn, config, total_timeout)
+        execution_result = self._send_daemon_request("secure", config, total_timeout)
 
         # Handle subprocess execution errors
         if execution_result.get("subprocess_error"):
@@ -777,10 +845,8 @@ class OfflineVerificationService:
                 "insecure_verifier_code": problem.insecure_verifier
             }
             
-            # Run in separate process (insecure verifier returns JSON directly)
-            # Use/reuse insecure daemon
-            conn = self._ensure_daemon("insecure")
-            execution_result = self._send_daemon_request(conn, config, 15)
+            # Run in external namespaced daemon
+            execution_result = self._send_daemon_request("insecure", config, 15)
             
             # Handle subprocess execution errors
             if execution_result.get("subprocess_error"):
@@ -813,11 +879,11 @@ class OfflineVerificationService:
 
     def _run_in_subprocess(self, config: dict) -> dict:
         """Deprecated: replaced by daemon helpers. Kept for compatibility."""
-        conn = self._ensure_daemon("secure")
+        # Send via external namespaced daemon
         per = int(config.get("timeout_per_test", config.get("timeout", 6)))
         num = len(config.get("batch_inputs", [1]))
         total_timeout = max(1, per + 1) * max(1, num) + 2
-        return self._send_daemon_request(conn, config, total_timeout)
+        return self._send_daemon_request("secure", config, total_timeout)
     
     def _monitor_memory_usage(self, process, memory_exceeded_event, monitor_stop_event):
         """Monitor process memory usage and terminate if it exceeds the limit."""
