@@ -435,9 +435,10 @@ if __name__ == "__main__":
                 
                 # Start memory monitoring in a separate thread
                 memory_exceeded_event = threading.Event()
+                monitor_stop_event = threading.Event()
                 monitor_thread = threading.Thread(
                     target=self._monitor_memory_usage,
-                    args=(process, memory_exceeded_event),
+                    args=(process, memory_exceeded_event, monitor_stop_event),
                     daemon=True
                 )
                 monitor_thread.start()
@@ -448,8 +449,8 @@ if __name__ == "__main__":
                         timeout=10  # Extra buffer for subprocess overhead
                     )
                 finally:
-                    # Ensure monitoring thread stops
-                    memory_exceeded_event.set()
+                    # Signal monitor to stop (without marking memory exceeded)
+                    monitor_stop_event.set()
                 
                 # Check if memory limit was exceeded
                 if memory_exceeded_event.is_set():
@@ -482,11 +483,11 @@ if __name__ == "__main__":
         except Exception as e:
             return {"subprocess_error": f"Failed to run subprocess: {str(e)}"}
     
-    def _monitor_memory_usage(self, process, memory_exceeded_event):
+    def _monitor_memory_usage(self, process, memory_exceeded_event, monitor_stop_event):
         """Monitor process memory usage and terminate if it exceeds the limit."""
         try:
             psutil_process = psutil.Process(process.pid)
-            while process.poll() is None:  # While process is still running
+            while not monitor_stop_event.is_set() and process.poll() is None:  # While process is still running
                 try:
                     memory_info = psutil_process.memory_info()
                     memory_usage = memory_info.rss  # Resident Set Size (physical memory)
@@ -528,9 +529,10 @@ if __name__ == "__main__":
                 
                 # Start memory monitoring in a separate thread
                 memory_exceeded_event = threading.Event()
+                monitor_stop_event = threading.Event()
                 monitor_thread = threading.Thread(
                     target=self._monitor_memory_usage,
-                    args=(process, memory_exceeded_event),
+                    args=(process, memory_exceeded_event, monitor_stop_event),
                     daemon=True
                 )
                 monitor_thread.start()
@@ -541,11 +543,12 @@ if __name__ == "__main__":
                         timeout=15  # Extra buffer for subprocess overhead
                     )
                 finally:
-                    # Ensure monitoring thread stops
-                    memory_exceeded_event.set()
+                    # Signal monitor to stop (without marking memory exceeded)
+                    monitor_stop_event.set()
                 
                 # Check if memory limit was exceeded
                 if memory_exceeded_event.is_set():
+                    print(f"Memory limit exceeded: {self.memory_limit_mb}MB")
                     return {"status": "crashed", "feedback": f"Memory limit exceeded ({self.memory_limit_mb}MB)"}
                 
                 if process.returncode != 0:
