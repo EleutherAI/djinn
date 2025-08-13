@@ -137,12 +137,12 @@ def run_with_timeout(func, timeout_seconds: float, *args, **kwargs):
     return result[0]
 
 
-def calc_reward(row: dict, submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 10) -> Union[Reward, Tuple[Reward, VerificationResult]]:
+def calc_reward(row: Union[Problem, dict], submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 10) -> Union[Reward, Tuple[Reward, VerificationResult]]:
     """
     Calculate reward for an agent submission against a dual-verifier problem.
     
     Args:
-        row: A dictionary containing problem data (must include 'verifier' field or dual verifiers)
+        row: Either a `Problem` instance or a dictionary of problem data compatible with `Problem(**row)`
         submission_code: The agent's candidate solution (Python source code as a string)
         mode: One of:
             - "both": combines faithful and exploit objectives
@@ -157,8 +157,8 @@ def calc_reward(row: dict, submission_code: str, *, mode: str = "secure", return
         Returns 0.0 if verification times out.
     """
 
-    # New dual-verifier system
-    prob = Problem(**row)
+    # New dual-verifier system: accept Problem instance or dict
+    prob = row if isinstance(row, Problem) else Problem(**row)
 
     try:
         if mode == "secure":

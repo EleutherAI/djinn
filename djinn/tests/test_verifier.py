@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from djinn.core.registry import registry
 from djinn.core.problem import Problem
 from djinn.sandbox.verification_service import get_verification_service, force_offline_verification, force_online_verification
+from djinn.core.reward import calc_reward
 from djinn.core.sandbox_defs import VerificationStatus
 
 
@@ -70,9 +71,8 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
     print("="*60)
     
     try:
-        # Force offline verification and get service
+        # Force offline verification
         force_offline_verification()
-        offline_service = get_verification_service()
         test_problem = create_test_problem()
         
         results = {
@@ -91,7 +91,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test ground truth with secure verifier
         start_time = time.time()
-        gt_secure = offline_service.verify_single(test_problem, test_problem.ground_truth, secure=True)
+        _, gt_secure = calc_reward(test_problem, test_problem.ground_truth, mode="secure", return_result=True)
         gt_secure_time = time.time() - start_time
         results["ground_truth_secure"] = {
             "status": gt_secure.status.value,
@@ -101,7 +101,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test ground truth with insecure verifier
         start_time = time.time()
-        gt_insecure = offline_service.verify_single(test_problem, test_problem.ground_truth, secure=False)
+        _, gt_insecure = calc_reward(test_problem, test_problem.ground_truth, mode="insecure", return_result=True)
         gt_insecure_time = time.time() - start_time
         results["ground_truth_insecure"] = {
             "status": gt_insecure.status.value,
@@ -111,7 +111,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test exploit with secure verifier
         start_time = time.time()
-        exploit_secure = offline_service.verify_single(test_problem, test_problem.exploit, secure=True)
+        _, exploit_secure = calc_reward(test_problem, test_problem.exploit, mode="secure", return_result=True)
         exploit_secure_time = time.time() - start_time
         results["exploit_secure"] = {
             "status": exploit_secure.status.value,
@@ -121,7 +121,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test exploit with insecure verifier
         start_time = time.time()
-        exploit_insecure = offline_service.verify_single(test_problem, test_problem.exploit, secure=False)
+        _, exploit_insecure = calc_reward(test_problem, test_problem.exploit, mode="insecure", return_result=True)
         exploit_insecure_time = time.time() - start_time
         results["exploit_insecure"] = {
             "status": exploit_insecure.status.value,
@@ -131,7 +131,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test null with secure verifier
         start_time = time.time()
-        null_secure = offline_service.verify_single(test_problem, test_problem.nulls[0], secure=True)
+        _, null_secure = calc_reward(test_problem, test_problem.nulls[0], mode="secure", return_result=True)
         null_secure_time = time.time() - start_time
         results["null_secure"] = {
             "status": null_secure.status.value,
@@ -141,7 +141,7 @@ def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
         
         # Test null with insecure verifier
         start_time = time.time()
-        null_insecure = offline_service.verify_single(test_problem, test_problem.nulls[0], secure=False)
+        _, null_insecure = calc_reward(test_problem, test_problem.nulls[0], mode="insecure", return_result=True)
         null_insecure_time = time.time() - start_time
         results["null_insecure"] = {
             "status": null_insecure.status.value,
@@ -204,13 +204,11 @@ def test_service_comparison(problem: Problem, verbose: bool = False) -> Dict[str
         return {"skipped": True, "reason": "E2B_API_KEY not available"}
     
     try:
-        # Get offline service
+        # We will switch the global verifier selection around calc_reward calls
         force_offline_verification()
-        offline_service = get_verification_service()
-        
-        # Force online service
+        offline_selected = get_verification_service() is not None
         force_online_verification()
-        online_service = get_verification_service()
+        online_selected = get_verification_service() is not None
         
         results = {
             "problem_id": problem.id,
@@ -237,14 +235,16 @@ def test_service_comparison(problem: Problem, verbose: bool = False) -> Dict[str
                 if verbose:
                     print(f"   Testing {test_name} with {verifier_type} verifier...")
                 
-                # Test offline
+                # Test offline via calc_reward with forced selection
                 start_time = time.time()
-                offline_result = offline_service.verify_single(problem, code, secure=secure)
+                force_offline_verification()
+                _, offline_result = calc_reward(problem, code, mode=("secure" if secure else "insecure"), return_result=True)
                 offline_time = time.time() - start_time
                 
-                # Test online
+                # Test online via calc_reward with forced selection
                 start_time = time.time()
-                online_result = online_service.verify_single(problem, code, secure=secure)
+                force_online_verification()
+                _, online_result = calc_reward(problem, code, mode=("secure" if secure else "insecure"), return_result=True)
                 online_time = time.time() - start_time
                 
                 # Compare results
@@ -353,11 +353,9 @@ def test_verifier_security(problem: Problem, verbose: bool = False) -> Dict[str,
     """Test that the secure verifier properly blocks the exploit."""
     print(f"\n🔒 Testing Verifier Security for {problem.id}")
     
-    service = get_verification_service()
-    
     try:
         # Test ground truth on secure verifier (should pass)
-        gt_result = service.verify_single(problem, problem.ground_truth, secure=True)
+        _, gt_result = calc_reward(problem, problem.ground_truth, mode="secure", return_result=True)
         
         gt_passes = gt_result.status.value == "passed"
         
@@ -374,7 +372,7 @@ def test_verifier_security(problem: Problem, verbose: bool = False) -> Dict[str,
             sys.exit(1)
         
         # Test exploit on secure verifier (should fail)
-        exploit_result = service.verify_single(problem, problem.exploit, secure=True)
+        _, exploit_result = calc_reward(problem, problem.exploit, mode="secure", return_result=True)
         exploit_blocked = exploit_result.status != "passed"
         
         if verbose:
