@@ -1,0 +1,3 @@
+[submodule "verifiers"]
+	path = verifiers
+	url = git@github.com:EleutherAI/verifiers.git

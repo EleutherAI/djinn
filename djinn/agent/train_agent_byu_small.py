@@ -9,13 +9,14 @@ import argparse
 from transformers.trainer_utils import get_last_checkpoint
 from djinn.core.reward import calc_reward
 from djinn.core.problem import Problem
+import os
 """
 Multi-GPU training (single node, 4 training + 4 inference)
 
-CUDA_VISIBLE_DEVICES=6,7 trl vllm-serve --model 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B' \
-    --tensor-parallel-size 2
+CUDA_VISIBLE_DEVICES=6,7 trl vllm-serve --model 'willcb/Qwen3-8B' \
+    --data-parallel-size 2
 
-DJINN_OFFLINE_VERIFICATION=true CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch  --config_file ../verifiable_rl/trl/examples/accelerate_configs/deepspeed_zero3.yaml djinn/agent/train_agent.py
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch  --config_file ../verifiable_rl/trl/examples/accelerate_configs/deepspeed_zero3.yaml djinn/agent/train_agent_byu_small.py
 """
 
 # Parse command line arguments
@@ -24,13 +25,14 @@ parser.add_argument('--learning-rate', '--lr', type=float, default=1e-5,
                     help='Learning rate for training (default: 1e-5)')
 args = parser.parse_args()
 
+print(os.getenv("CUDA_VISIBLE_DEVICES"))
 print(f"Using learning rate: {args.learning_rate}")
 
 dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
 eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
 
-model_name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-run_name = f"djinn-agent-r64-gclip1e-3-lr{args.learning_rate}-drgrpo"
+model_name = "willcb/Qwen3-8B"
+run_name = f"djinn-qwen3-lr{args.learning_rate}-drsrpo-small"
 
 peft_config = LoraConfig(
     task_type="CAUSAL_LM",
@@ -42,16 +44,13 @@ peft_config = LoraConfig(
 )
 
 GENERATION_INSTRUCTIONS = """
-Generate only one block of code. Wrap your answer in ```python and ```END (including the END part). Resolve your reasoning/thinking quickly and progress to answering the question. You should think less than you usually do. In <think>, write an outline of the solution with ≤ 10 numbered steps, ≤ 20 words each. End with </think>."""
+Generate only one block of code. /no_think, /no_thinking"""
 
 def gen_prompt_column(row):
     return {"prompt": [
         {"role": "system", "content": GENERATION_INSTRUCTIONS},
         {"role": "user", "content": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}"}
     ]}
-
-
-
 dataset = dataset.map(gen_prompt_column)
 eval_dataset = eval_dataset.map(gen_prompt_column)
 
@@ -108,7 +107,7 @@ def length_penalty_reward(**kwargs):
     - Returns -1 at 100% of max completion length  
     - Linearly interpolates between these points
     """
-    completions_ids = kwargs["completions_ids"]
+    completions_ids = kwargs["completion_ids"]
     max_completion_length = 16384 * 2  # From training config
     rewards = []
     
@@ -197,7 +196,7 @@ generation_kwargs = {
 }
 
 training_args=GRPOConfig(
-    output_dir=f"/mnt/ssd-2/david/outputs/{run_name}",
+    output_dir=f"outputs/{run_name}",
     run_name=run_name,
     learning_rate=args.learning_rate, # Use command line argument
     lr_scheduler_type="constant_with_warmup",
@@ -209,12 +208,12 @@ training_args=GRPOConfig(
     max_grad_norm=0.001,
     num_iterations=2,
     beta=0.0,
-    max_prompt_length=16384,
-    max_completion_length=16384*2,
-    per_device_train_batch_size=1,
+    max_prompt_length=4096,
+    max_completion_length=4096,
+    per_device_train_batch_size=4,
     per_device_eval_batch_size=2,
     num_generations=12,
-    gradient_accumulation_steps=8,
+    gradient_accumulation_steps=2,
     gradient_checkpointing=True,
     save_strategy="steps",
     save_steps=20,
@@ -227,7 +226,7 @@ training_args=GRPOConfig(
     logging_steps=1,
     log_on_each_node=False,
     log_completions=True,
-    report_to="wandb",
+    report_to=None,
     reward_weights=reward_weights,
     generation_kwargs=generation_kwargs,
 )

@@ -55,8 +55,16 @@ eval_dataset = eval_dataset.map(gen_prompt_column)
 problem_fields = [f.name for f in dataclasses.fields(Problem)]
 
 def extract_code(completion):
+    """Extract code from completion, handling both conversational and standard formats"""
+    if isinstance(completion, list) and len(completion) > 0:
+        # Handle conversational format: list of dicts with roles
+        content = completion[-1].get("content", "")
+    else:
+        # Handle standard format: string (backward compatibility)
+        content = completion
+    
     try:
-        return completion.split("```python")[1].split("```")[0]
+        return content.split("```python")[1].split("```")[0]
     except:
         return ""
 

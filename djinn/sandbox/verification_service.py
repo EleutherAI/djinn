@@ -88,7 +88,7 @@ class VerificationService:
                     "submission_code": submission_code,
                     "function_name": problem.function_name,
                     "test_input": test_input,
-                    "timeout": 6
+                    "timeout": 10
                 }
                 
                 # Write config to sandbox
