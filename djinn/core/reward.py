@@ -137,7 +137,7 @@ def run_with_timeout(func, timeout_seconds: float, *args, **kwargs):
     return result[0]
 
 
-def calc_reward(row: Union[Problem, dict], submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 10) -> Union[Reward, Tuple[Reward, VerificationResult]]:
+def calc_reward(row: Union[Problem, dict], submission_code: str, *, mode: str = "secure", return_result: bool = False, timeout: float = 2) -> Union[Reward, Tuple[Reward, VerificationResult]]:
     """
     Calculate reward for an agent submission against a dual-verifier problem.
     
@@ -194,6 +194,9 @@ def calc_reward(row: Union[Problem, dict], submission_code: str, *, mode: str = 
     # Sanitize the reward value as well
     reward = sanitize_numeric_value(reward)
     
+    if "timed out" in result.feedback.lower():
+        print(f"mode:{mode} calc_reward: {reward}, result: {result}")
+
     if return_result:
         return reward, result
     else:

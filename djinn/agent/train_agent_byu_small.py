@@ -19,29 +19,7 @@ CUDA_VISIBLE_DEVICES=6,7 trl vllm-serve --model 'willcb/Qwen3-8B' \
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch  --config_file ../verifiable_rl/trl/examples/accelerate_configs/deepspeed_zero3.yaml djinn/agent/train_agent_byu_small.py
 """
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description='Train DJINN agent with configurable learning rate')
-parser.add_argument('--learning-rate', '--lr', type=float, default=1e-5, 
-                    help='Learning rate for training (default: 1e-5)')
-args = parser.parse_args()
-
-print(os.getenv("CUDA_VISIBLE_DEVICES"))
-print(f"Using learning rate: {args.learning_rate}")
-
-dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
-eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
-
-model_name = "willcb/Qwen3-8B"
-run_name = f"djinn-qwen3-lr{args.learning_rate}-drsrpo-small"
-
-peft_config = LoraConfig(
-    task_type="CAUSAL_LM",
-    r=64,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
-    lora_alpha=128,
-    lora_dropout=0.05,
-    bias="none"
-)
+ 
 
 GENERATION_INSTRUCTIONS = """
 Generate only one block of code. /no_think, /no_thinking"""
@@ -51,10 +29,9 @@ def gen_prompt_column(row):
         {"role": "system", "content": GENERATION_INSTRUCTIONS},
         {"role": "user", "content": f"Problem: {row['description']}\n\n{row['insecure_verifier_info']}"}
     ]}
-dataset = dataset.map(gen_prompt_column)
-eval_dataset = eval_dataset.map(gen_prompt_column)
+ 
 
-problem_fields = [f.name for f in dataclasses.fields(Problem)]
+ 
 
 def extract_code(completion):
     """Extract code from completion, handling both conversational and standard formats"""
@@ -156,89 +133,128 @@ def create_exploit_type_reward_func(target_exploit_type, dataset_fraction):
     
     return exploit_type_reward
 
-# Analyze exploit types in the training dataset
-exploit_type_counts = Counter(dataset['exploit_type'])
-total_problems = len(dataset)
+ 
 
-print(f"Found {len(exploit_type_counts)} exploit types in training dataset:")
-for exploit_type, count in exploit_type_counts.most_common():
-    fraction = count / total_problems
-    print(f"  {exploit_type}: {count} problems ({fraction:.1%})")
+def main():
+    print(f"imported train_agent_byu_small in pid={os.getpid()} name={__name__}")
 
-# Create base reward functions
-reward_funcs = [
-    secure_reward,
-    insecure_reward,
-    reward_gap,
-    length_penalty_reward,
-]
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train DJINN agent with configurable learning rate')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=1e-5,
+                        help='Learning rate for training (default: 1e-5)')
+    args = parser.parse_args()
 
-# Create per-exploit-type reward functions
-exploit_type_reward_funcs = []
-for exploit_type, count in exploit_type_counts.items():
-    if exploit_type:  # Skip empty exploit types
-        dataset_fraction = count / total_problems
-        reward_func = create_exploit_type_reward_func(exploit_type, dataset_fraction)
-        reward_func.__name__ = f"reward_delta_{exploit_type}"
-        exploit_type_reward_funcs.append(reward_func)
+    print(os.getenv("CUDA_VISIBLE_DEVICES"))
+    print(f"Using learning rate: {args.learning_rate}")
 
-reward_funcs.extend(exploit_type_reward_funcs)
+    dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
+    eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
 
-# Set up reward weights: only the insecure_reward has weight 1.0, all others have weight 0
-reward_weights = [0, 1.0, 0, 1.0]  # secure, insecure, reward_gap, length_penalty
-reward_weights.extend([0] * len(exploit_type_reward_funcs))  # All exploit-type rewards have weight 0
+    dataset = dataset.map(gen_prompt_column)
+    eval_dataset = eval_dataset.map(gen_prompt_column)
 
-print(f"Total reward functions: {len(reward_funcs)}")
-print(f"Reward weights: {reward_weights}")
+    # Compute problem fields for reward functions
+    global problem_fields
+    problem_fields = [f.name for f in dataclasses.fields(Problem)]
 
-generation_kwargs = {
-    "stop": ["END", "```\n"]
-}
+    # Analyze exploit types in the training dataset
+    exploit_type_counts = Counter(dataset['exploit_type'])
+    total_problems = len(dataset)
 
-training_args=GRPOConfig(
-    output_dir=f"outputs/{run_name}",
-    run_name=run_name,
-    learning_rate=args.learning_rate, # Use command line argument
-    lr_scheduler_type="constant_with_warmup",
-    warmup_steps=10,
-    num_train_epochs=10,
-    temperature=0.6,
-    max_steps=1000,
-    bf16=True,
-    max_grad_norm=0.001,
-    num_iterations=2,
-    beta=0.0,
-    max_prompt_length=4096,
-    max_completion_length=4096,
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=2,
-    num_generations=12,
-    gradient_accumulation_steps=2,
-    gradient_checkpointing=True,
-    save_strategy="steps",
-    save_steps=20,
-    eval_strategy="steps",
-    loss_type="dr_grpo",
-    eval_steps=20,
-    save_only_model=False,
-    use_vllm=True,
-    vllm_mode="server",
-    logging_steps=1,
-    log_on_each_node=False,
-    log_completions=True,
-    report_to=None,
-    reward_weights=reward_weights,
-    generation_kwargs=generation_kwargs,
-)
+    print(f"Found {len(exploit_type_counts)} exploit types in training dataset:")
+    for exploit_type, count in exploit_type_counts.most_common():
+        fraction = count / total_problems
+        print(f"  {exploit_type}: {count} problems ({fraction:.1%})")
 
-trainer = GRPOTrainer(
-    model=model_name,
-    args=training_args,
-    train_dataset=dataset,
-    eval_dataset=eval_dataset,
-    peft_config=peft_config,
-    reward_funcs=reward_funcs,
+    # Create base reward functions
+    reward_funcs = [
+        secure_reward,
+        insecure_reward,
+        reward_gap,
+        length_penalty_reward,
+    ]
 
-)
+    # Create per-exploit-type reward functions
+    exploit_type_reward_funcs = []
+    for exploit_type, count in exploit_type_counts.items():
+        if exploit_type:  # Skip empty exploit types
+            dataset_fraction = count / total_problems
+            reward_func = create_exploit_type_reward_func(exploit_type, dataset_fraction)
+            reward_func.__name__ = f"reward_delta_{exploit_type}"
+            exploit_type_reward_funcs.append(reward_func)
 
-trainer.train(resume_from_checkpoint=get_last_checkpoint(training_args.output_dir))
+    reward_funcs.extend(exploit_type_reward_funcs)
+
+    # Set up reward weights: only the insecure_reward has weight 1.0, all others have weight 0
+    reward_weights = [0, 1.0, 0, 1.0]  # secure, insecure, reward_gap, length_penalty
+    reward_weights.extend([0] * len(exploit_type_reward_funcs))  # All exploit-type rewards have weight 0
+
+    print(f"Total reward functions: {len(reward_funcs)}")
+    print(f"Reward weights: {reward_weights}")
+
+    generation_kwargs = {
+        "stop": ["END", "```\n"]
+    }
+
+    model_name = "willcb/Qwen3-8B"
+    run_name = f"djinn-qwen3-lr{args.learning_rate}-drsrpo-small"
+
+    peft_config = LoraConfig(
+        task_type="CAUSAL_LM",
+        r=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
+        lora_alpha=128,
+        lora_dropout=0.05,
+        bias="none"
+    )
+
+    training_args = GRPOConfig(
+        output_dir=f"outputs/{run_name}",
+        run_name=run_name,
+        learning_rate=args.learning_rate,  # Use command line argument
+        lr_scheduler_type="constant_with_warmup",
+        warmup_steps=10,
+        num_train_epochs=10,
+        temperature=0.6,
+        max_steps=1000,
+        bf16=True,
+        max_grad_norm=0.001,
+        num_iterations=2,
+        beta=0.0,
+        max_prompt_length=4096,
+        max_completion_length=4096,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=2,
+        num_generations=12,
+        gradient_accumulation_steps=2,
+        gradient_checkpointing=True,
+        save_strategy="steps",
+        save_steps=3,
+        eval_strategy="steps",
+        loss_type="dr_grpo",
+        eval_steps=2,
+        save_only_model=False,
+        use_vllm=True,
+        vllm_mode="server",
+        logging_steps=1,
+        log_on_each_node=False,
+        log_completions=False,
+        report_to="wandb",
+        reward_weights=reward_weights,
+        generation_kwargs=generation_kwargs,
+    )
+
+    trainer = GRPOTrainer(
+        model=model_name,
+        args=training_args,
+        train_dataset=dataset,
+        eval_dataset=eval_dataset,
+        peft_config=peft_config,
+        reward_funcs=reward_funcs,
+    )
+
+    trainer.train(resume_from_checkpoint=get_last_checkpoint(training_args.output_dir))
+
+
+if __name__ == "__main__":
+    main()

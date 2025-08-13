@@ -4,6 +4,9 @@ import time
 import threading
 import argparse
 import multiprocessing as mp
+import os
+import logging
+from logging.handlers import RotatingFileHandler
 
 # Import child entrypoints and monitor from the offline service
 from .offline_verification_service import (
@@ -18,6 +21,11 @@ def _run_loop(mode: str, mem_mb: int) -> None:
     ctx = mp.get_context("fork")
     stdin = sys.stdin
     stdout = sys.stdout
+    # stderr heartbeat: daemon started
+    try:
+        sys.stderr.write(f"[daemon {mode}] start\n"); sys.stderr.flush()
+    except Exception:
+        pass
 
     for line in stdin:
         line = line.strip()
@@ -28,10 +36,21 @@ def _run_loop(mode: str, mem_mb: int) -> None:
         except Exception as e:
             stdout.write(json.dumps({"subprocess_error": f"Invalid request: {e}"}) + "\n")
             stdout.flush()
+            # stderr heartbeat: invalid json
+            try:
+                sys.stderr.write(f"[daemon {mode}] invalid_json: {e}\n"); sys.stderr.flush()
+            except Exception:
+                pass
             continue
 
-        if isinstance(req, dict) and req.get("cmd") == "shutdown":
-            break
+
+        # Health check
+        if isinstance(req, dict) and req.get("cmd") == "ping":
+            try:
+                stdout.write(json.dumps({"cmd": "pong"}) + "\n"); stdout.flush()
+            except Exception:
+                pass
+            continue
 
         # Create pipe and child process using fork
         if mode == "secure":
@@ -45,18 +64,35 @@ def _run_loop(mode: str, mem_mb: int) -> None:
         else:
             stdout.write(json.dumps({"subprocess_error": f"Unknown mode: {mode}"}) + "\n")
             stdout.flush()
+            # stderr heartbeat: bad mode
+            try:
+                sys.stderr.write(f"[daemon {mode}] unknown_mode\n"); sys.stderr.flush()
+            except Exception:
+                pass
             continue
 
         proc = ctx.Process(target=target, args=args)
         proc.daemon = False
         proc.start()
+        start_ts = time.time()
+        # Close the child's end in the parent to avoid leaking FDs per request
+        try:
+            child_ch.close()
+        except Exception:
+            pass
+        # stderr heartbeat: child spawned
+        try:
+            sys.stderr.write(f"[daemon {mode}] child_spawned pid={proc.pid}\n"); sys.stderr.flush()
+        except Exception:
+            pass
 
         # Memory monitor thread
         exceeded = threading.Event()
         stop = threading.Event()
+        peak = {"peak": 0}
         mon = threading.Thread(
             target=_daemon_memory_monitor,
-            args=(proc.pid, mem_bytes, exceeded, stop),
+            args=(proc.pid, mem_bytes, exceeded, stop, peak),
             daemon=True,
         )
         mon.start()
@@ -83,6 +119,8 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                         proc.kill()
             except Exception:
                 pass
+            elapsed = time.time() - start_ts
+            peak_mb = peak.get("peak", 0) / (1024 * 1024)
             payload = (
                 {"batch_results": [{"error": f"Memory limit exceeded ({mem_mb}MB)"} for _ in req.get("batch_inputs", [None])]}
                 if mode == "secure"
@@ -90,6 +128,11 @@ def _run_loop(mode: str, mem_mb: int) -> None:
             )
             stdout.write(json.dumps(payload) + "\n")
             stdout.flush()
+            # stderr heartbeat: memory exceeded
+            try:
+                sys.stderr.write(f"[daemon {mode}] child_mem_exceeded pid={proc.pid} runtime={elapsed:.3f}s peak_rss={peak_mb:.1f}MB limit={mem_mb}MB\n"); sys.stderr.flush()
+            except Exception:
+                pass
             continue
 
         if proc.is_alive():
@@ -102,16 +145,58 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 pass
         
         if proc.is_alive():
+            elapsed = time.time() - start_ts
+            peak_mb = peak.get("peak", 0) / (1024 * 1024)
             stdout.write(json.dumps({"subprocess_error": "Subprocess timed out"}) + "\n")
             stdout.flush()
+            # stderr heartbeat: timeout
+            try:
+                sys.stderr.write(f"[daemon {mode}] child_timeout pid={proc.pid} runtime={elapsed:.3f}s peak_rss={peak_mb:.1f}MB limit={mem_mb}MB\n"); sys.stderr.flush()
+            except Exception:
+                pass
             continue
 
         try:
-            resp = parent_ch.recv() if parent_ch.poll(0) else {"subprocess_error": "No result from subprocess"}
+            if parent_ch.poll(0):
+                resp = parent_ch.recv()
+                stdout.write(json.dumps(resp) + "\n")
+                stdout.flush()
+                # stderr heartbeat: response sent
+                try:
+                    elapsed = time.time() - start_ts
+                    peak_mb = peak.get("peak", 0) / (1024 * 1024)
+                    sys.stderr.write(f"[daemon {mode}] response_sent pid={proc.pid} runtime={elapsed:.3f}s peak_rss={peak_mb:.1f}MB\n"); sys.stderr.flush()
+                except Exception:
+                    pass
+            else:
+                stdout.write(json.dumps({"subprocess_error": "No result from subprocess"}) + "\n")
+                stdout.flush()
+                # stderr heartbeat: no result
+                try:
+                    elapsed = time.time() - start_ts
+                    peak_mb = peak.get("peak", 0) / (1024 * 1024)
+                    sys.stderr.write(f"[daemon {mode}] no_result pid={proc.pid} runtime={elapsed:.3f}s peak_rss={peak_mb:.1f}MB\n"); sys.stderr.flush()
+                except Exception:
+                    pass
         except Exception as e:
             resp = {"subprocess_error": f"Failed to read result: {e}"}
-        stdout.write(json.dumps(resp) + "\n")
-        stdout.flush()
+            stdout.write(json.dumps(resp) + "\n")
+            stdout.flush()
+            # stderr heartbeat: read exception
+            try:
+                sys.stderr.write(f"[daemon {mode}] read_exception pid={proc.pid} err={e}\n"); sys.stderr.flush()
+            except Exception:
+                pass
+        # Close pipe and reap child to avoid FD/process leaks across many requests
+        try:
+            parent_ch.close()
+        except Exception:
+            pass
+        try:
+            # Child should have already exited; join without waiting
+            proc.join(timeout=0)
+        except Exception:
+            pass
 
 
 def main() -> None:

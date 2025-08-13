@@ -452,7 +452,7 @@ def main():
     else:
         # Only test first 5 problems
         all_problems = list(registry)
-        problems_to_test = all_problems[:5]
+        problems_to_test = all_problems[:50]
     
     print(f"Testing {len(problems_to_test)} problem(s)")
     print(f"Verbose mode: {'ON' if args.verbose else 'OFF'}")
