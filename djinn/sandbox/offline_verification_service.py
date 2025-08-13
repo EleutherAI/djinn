@@ -303,9 +303,11 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                 try:
                     per = int(req.get("timeout_per_test", req.get("timeout", 6)))
                     num = len(req.get("batch_inputs", [1]))
-                    total_timeout = max(1, per + 1) * max(1, num) + 2
-                    _log(f"waiting for child {child.pid} with timeout {total_timeout}s")
-                    child.join(total_timeout)
+                    total_timeout = req.get("total_timeout")
+                    if total_timeout is None:
+                        total_timeout = max(1, per + 1) * max(1, num) + 2
+                    _log(f"waiting for child {child.pid} with timeout {int(total_timeout)}s")
+                    child.join(int(total_timeout))
                     _log(f"child {child.pid} join completed, alive={child.is_alive()}")
                 finally:
                     stop_event.set()
@@ -411,8 +413,9 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                 mon.start()
 
                 try:
-                    _log(f"waiting for child {child.pid} with timeout 15s")
-                    child.join(15)
+                    total_timeout = req.get("total_timeout", 15)
+                    _log(f"waiting for child {child.pid} with timeout {int(total_timeout)}s")
+                    child.join(int(total_timeout))
                     _log(f"child {child.pid} join completed, alive={child.is_alive()}")
                 finally:
                     stop_event.set()
@@ -1025,7 +1028,10 @@ class OfflineVerificationService:
         # Execute all tests in one child process via external namespaced daemon
         per = int(config.get("timeout_per_test", config.get("timeout", 6)))
         num = len(config.get("batch_inputs", [1]))
-        total_timeout = max(1, per + 1) * max(1, num) + 2
+        # Tighten overall timeout to better match observed response times
+        total_timeout = min(5, max(1, per + 1) * max(1, num) + 2)
+        # Also pass explicit total_timeout down to the daemon so its join matches
+        config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
         # Handle subprocess execution errors
@@ -1078,7 +1084,9 @@ class OfflineVerificationService:
             }
             
             # Run in external namespaced daemon
-            execution_result = self._send_daemon_request("insecure", config, 15)
+            # Use a smaller overall timeout for insecure too
+            config["total_timeout"] = 5
+            execution_result = self._send_daemon_request("insecure", config, 5)
             
             # Handle subprocess execution errors
             if execution_result.get("subprocess_error"):
