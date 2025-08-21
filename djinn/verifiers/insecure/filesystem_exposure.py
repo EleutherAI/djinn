@@ -14,6 +14,7 @@ import tempfile
 import ast
 from dataclasses import dataclass
 from typing import List, Tuple
+import inspect
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
 

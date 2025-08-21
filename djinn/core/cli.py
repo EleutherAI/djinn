@@ -1,7 +1,7 @@
 import argparse
 import os
 from .registry import registry
-from .exporter import export_problems_to_jsonl, export_to_huggingface
+from .exporter import export_problems_to_jsonl, export_to_huggingface, export_filtered_problems_to_jsonl, export_filtered_to_huggingface
 from .scaffolder import scaffold_problem
 from .analysis import print_difficulty_analysis, create_stratified_eval_split
 
@@ -619,9 +619,15 @@ def handle_analyze(args):
         print_difficulty_analysis()
 
 def handle_export(args):
+    # Check if filtering by exploit type
+    filter_exploit_type = getattr(args, 'filter_exploit_type', None)
+    
     if args.hf_repo:
         try:
-            export_to_huggingface(args.hf_repo, private=args.private)
+            if filter_exploit_type:
+                export_filtered_to_huggingface(args.hf_repo, filter_exploit_type, private=args.private)
+            else:
+                export_to_huggingface(args.hf_repo, private=args.private)
         except ImportError:
             print("Error: 'datasets' and 'huggingface-hub' packages are required for this feature.")
             print("Please run: pip install datasets huggingface-hub")
@@ -630,8 +636,12 @@ def handle_export(args):
             print("Please ensure you are logged in via 'huggingface-cli login'.")
 
     else:
-        export_problems_to_jsonl(args.out)
-        print(f"Exported all problems to {args.out}")
+        if filter_exploit_type:
+            export_filtered_problems_to_jsonl(args.out, filter_exploit_type)
+            print(f"Exported {filter_exploit_type} problems to {args.out}")
+        else:
+            export_problems_to_jsonl(args.out)
+            print(f"Exported all problems to {args.out}")
 
 def main():
     parser = argparse.ArgumentParser(description="Djinn: A framework for creating and verifying coding problems with exploits.")
@@ -684,6 +694,7 @@ def main():
     parser_export.add_argument("--out", default="dataset.jsonl", help="Output file path for the JSONL data (if not exporting to Hub).")
     parser_export.add_argument("--hf-repo", help="The Hugging Face Hub repository ID to push the dataset to (e.g., 'user/dataset-name').")
     parser_export.add_argument("--private", action="store_true", help="If set, the dataset will be private on the Hub.")
+    parser_export.add_argument("--filter-exploit-type", help="Export only problems with specific exploit type (e.g., 'test_skipping').")
     parser_export.set_defaults(func=handle_export)
 
     args = parser.parse_args()

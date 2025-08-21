@@ -305,7 +305,8 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
             try:
                 ctx_fork = mp.get_context("fork")
                 parent_ch, child_ch = ctx_fork.Pipe(duplex=False)
-                child = ctx_fork.Process(target=_insecure_child_entrypoint, args=(memory_limit_bytes, memory_limit_mb, req, child_ch))
+                # Always use module-based insecure verifier entrypoint
+                child = ctx_fork.Process(target=_insecure_module_child_entrypoint, args=(memory_limit_bytes, memory_limit_mb, req, child_ch))
                 child.daemon = False
                 child.start()
 
@@ -488,22 +489,8 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
             pass
 
 
-def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, config: dict, conn) -> None:
-    """Child process entrypoint for insecure verifier path with hard memory limit."""
-    class VerificationStatusShim:
-        PASSED = "passed"
-        FAILED = "failed"
-        CRASHED = "crashed"
-        TIMED_OUT = "timed_out"
-
-    class SingleVerificationResultShim:
-        def __init__(self, status, feedback=None):
-            self.status = status
-            self.feedback = feedback
-
-    def _timeout_handler(signum, frame):
-        raise Exception("Timeout")
-
+def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, config: dict, conn) -> None:
+    """Child process entrypoint for running module-based insecure verifiers safely."""
     # Apply memory limits
     try:
         resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
@@ -512,50 +499,66 @@ def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, co
         conn.send({"status": "crashed", "feedback": f"Failed to set memory limits: {str(e)}"})
         return
 
+    def _timeout_handler(signum, frame):
+        raise Exception("Timeout")
+
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(10)
+
     try:
         submission_code = config["submission_code"]
-        insecure_verifier_code = config["insecure_verifier_code"]
+        exploit_type = config["exploit_type"]
+        function_name = config["function_name"]
+        test_cases = config.get("test_cases", [])
+        order_dependent = bool(config.get("order_dependent", True))
 
-        verifier_namespace = {
-            "__builtins__": __builtins__,
-            "VerificationStatus": VerificationStatusShim,
-            "SingleVerificationResult": SingleVerificationResultShim,
-        }
-        exec(insecure_verifier_code, verifier_namespace)
-        if "verify" not in verifier_namespace:
-            conn.send({"status": "crashed", "feedback": "Insecure verifier does not define verify function"})
-            return
-        result = verifier_namespace["verify"](submission_code)
+        # Lightweight Problem surrogate for insecure verifiers
+        class _DummyProblem:
+            def __init__(self, function_name, test_cases, order_dependent):
+                self.function_name = function_name
+                self.test_cases = test_cases
+                self.order_dependent = order_dependent
 
-        if hasattr(result, "status"):
-            status = result.status
-            feedback = getattr(result, "feedback", None)
-        else:
-            status = str(result) if result else "crashed"
-            feedback = f"Unexpected result type: {type(result)}"
-        conn.send({"status": status, "feedback": feedback})
+            def _normalize_test_cases(self):
+                return self.test_cases or []
+
+        dummy_problem = _DummyProblem(function_name, test_cases, order_dependent)
+
+        # Load verifier module and execute
+        from djinn.verifiers import load_verifier
+        verifier_module = load_verifier(exploit_type, category="insecure")
+        result = verifier_module.verify(dummy_problem, submission_code)
+
+        status = getattr(result, "status", "crashed")
+        feedback = getattr(result, "feedback", None)
+        # Convert enum-like to primitive
+        try:
+            status_val = status.value if hasattr(status, "value") else str(status)
+        except Exception:
+            status_val = str(status)
+        conn.send({"status": status_val, "feedback": feedback})
     except MemoryError:
         conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
     except Exception as e:
-        error_msg = str(e)
-        if "timeout" in error_msg.lower():
+        msg = str(e) or f"Unknown error: {type(e).__name__}"
+        if "timeout" in msg.lower():
             conn.send({"status": "timed_out", "feedback": "Insecure verifier timed out"})
-        elif "memory" in error_msg.lower() or "cannot allocate" in error_msg.lower():
-            conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
         else:
-            conn.send({"status": "crashed", "feedback": f"Insecure verifier crashed: {error_msg}"})
+            conn.send({"status": "crashed", "feedback": f"Insecure verifier crashed: {msg}"})
     finally:
         try:
             signal.alarm(0)
         except Exception:
             pass
-        gc.collect()
         try:
             conn.close()
         except Exception:
             pass
+
+
+def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, config: dict, conn) -> None:
+    """Deprecated shim kept for compatibility; forward to module-based entrypoint."""
+    return _insecure_module_child_entrypoint(memory_limit_bytes, memory_limit_mb, config, conn)
 
 
 class OfflineVerificationService:
@@ -775,7 +778,12 @@ class OfflineVerificationService:
     
     def _verify_with_secure_subprocess(self, problem, submission_code: str):
         """Run secure verification using subprocess isolation."""
-        normalized_test_cases = problem._normalize_test_cases()
+        # Use secure_test_cases if available, otherwise fall back to full test_cases
+        secure_test_cases = getattr(problem, 'secure_test_cases', None)
+        if secure_test_cases is not None:
+            normalized_test_cases = secure_test_cases
+        else:
+            normalized_test_cases = problem._normalize_test_cases()
         order_dependent = getattr(problem, 'order_dependent', True)
         
         failed_tests = []
@@ -837,36 +845,46 @@ class OfflineVerificationService:
         )
     
     def _verify_with_insecure_verifier(self, problem, submission_code: str):
-        """Run insecure verification using the problem's insecure verifier with memory limits."""
+        """Run insecure verification using the problem's exploit_type to load verifier from @insecure/ directory."""
         try:
-            # Prepare configuration
-            config = {
+            exploit_type = getattr(problem, 'exploit_type', None)
+            if not exploit_type:
+                return VerificationResultSingle(
+                    status=VerificationStatus.CRASHED,
+                    feedback="No exploit_type specified - fallback disabled for testing"
+                )
+
+            # Prepare config for child process
+            normalized_test_cases = problem._normalize_test_cases()
+            cfg = {
                 "submission_code": submission_code,
-                "insecure_verifier_code": problem.insecure_verifier
+                "exploit_type": exploit_type,
+                "function_name": problem.function_name,
+                "test_cases": normalized_test_cases,
+                "order_dependent": getattr(problem, 'order_dependent', True),
             }
-            
-            # Run in external namespaced daemon
-            execution_result = self._send_daemon_request("insecure", config, 15)
-            
-            # Handle subprocess execution errors
+
+            # Run via the insecure daemon to ensure crashes map to CRASHED
+            per = 10
+            num = max(1, len(normalized_test_cases))
+            total_timeout = max(1, per + 1) * num + 2
+            cfg["cmd"] = "run"
+            cfg["kind"] = "module"
+            execution_result = self._send_daemon_request("insecure", cfg, total_timeout)
+
             if execution_result.get("subprocess_error"):
-                return VerificationResultSingle(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Insecure verifier subprocess failed: {execution_result['subprocess_error']}"
-                )
-            
-            # Parse result (insecure verifier should return status directly)
-            if "status" in execution_result:
-                return VerificationResultSingle(
-                    status=VerificationStatus(execution_result["status"]),
-                    feedback=execution_result.get("feedback")
-                )
-            else:
-                return VerificationResultSingle(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Unexpected result from insecure verifier: {execution_result}"
-                )
-                
+                return VerificationResultSingle(status=VerificationStatus.CRASHED, feedback=execution_result["subprocess_error"])
+
+            status_str = execution_result.get("status", "crashed")
+            feedback = execution_result.get("feedback")
+            # Normalize to enum
+            status_enum = {
+                "passed": VerificationStatus.PASSED,
+                "failed": VerificationStatus.FAILED,
+                "crashed": VerificationStatus.CRASHED,
+                "timed_out": VerificationStatus.TIMED_OUT,
+            }.get(status_str, VerificationStatus.CRASHED)
+            return VerificationResultSingle(status=status_enum, feedback=feedback)
         except Exception as e:
             return VerificationResultSingle(
                 status=VerificationStatus.CRASHED,

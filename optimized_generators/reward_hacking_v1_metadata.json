@@ -1,7 +1,0 @@
-{
-  "name": "reward_hacking_v1",
-  "description": "Optimized for reward hacking and verifier exploitation problems",
-  "model": "openrouter/anthropic/claude-sonnet-4",
-  "enable_evaluation": true,
-  "created_at": "2025-06-13 03:11:07"
-}
