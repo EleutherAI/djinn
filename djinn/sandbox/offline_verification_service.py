@@ -21,6 +21,7 @@ import resource
 import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import hashlib
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
 
@@ -341,6 +342,16 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                 try:
                     if parent_ch.poll(0):
                         result = parent_ch.recv()
+                        try:
+                            # Log a compact summary to help trace mismatches
+                            pid = req.get("problem_id")
+                            fn = req.get("function_name")
+                            csha = req.get("code_sha")
+                            br = result.get("batch_results") if isinstance(result, dict) else None
+                            sample = br[0] if isinstance(br, list) and br else None
+                            _log(f"service_logger: secure child result pid={pid} fn={fn} code_sha={csha} batch_len={(len(br) if isinstance(br, list) else 'n/a')} sample={sample}")
+                        except Exception:
+                            pass
                         conn.send(result)
                         elapsed = time.time() - child_start_ts
                         _log(f"result sent runtime={elapsed:.3f}s")
@@ -506,11 +517,23 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
 
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(int(config.get("timeout", 6)))
+
+    logger = _get_daemon_logger(
+        logger_name="djinn.secure_daemon",
+        log_path_env="DJINN_VERIFIER_INTERNAL_SECURE_LOG",
+        default_path="/tmp/djinn_verifier_internal_secure.log",
+    )
+
     try:
         submission_code = config["submission_code"]
         function_name = config["function_name"]
         test_input = config.get("test_input")
         batch_inputs = config.get("batch_inputs")
+        request_id = config.get("request_id")
+
+        code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+        logger.info(f"secure child entrypoint: code_sha={code_sha} function_name={function_name} test_input={test_input} batch_inputs={batch_inputs}")
 
         # Build namespace for user code
         namespace = {"__builtins__": __builtins__}
@@ -560,7 +583,11 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                         signal.alarm(0)
                     except Exception:
                         pass
-            conn.send({"batch_results": results})
+            logger.info(f"code_sha: {code_sha} secure child entrypoint: batch_results={results}")
+            payload = {"batch_results": results}
+            if request_id is not None:
+                payload["request_id"] = request_id
+            conn.send(payload)
         else:
             try:
                 old_stdout = sys.stdout
@@ -570,24 +597,35 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                 execution_time = time.time() - start_time
                 printed_output = captured_output.getvalue()
                 sys.stdout = old_stdout
-                conn.send({
+                payload = {
                     "output": actual_output,
                     "printed_output": printed_output,
                     "execution_time": execution_time,
                     "error": None,
-                })
+                }
+                if request_id is not None:
+                    payload["request_id"] = request_id
+                conn.send(payload)
             finally:
                 try:
                     signal.alarm(0)
                 except Exception:
                     pass
     except SyntaxError as e:
-        conn.send({"error": f"Syntax error: {str(e)}"})
+        payload = {"error": f"Syntax error: {str(e)}"}
+        rid = config.get("request_id")
+        if rid is not None:
+            payload["request_id"] = rid
+        conn.send(payload)
     except Exception as e:
         error_msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeoutexception" in error_msg.lower():
             error_msg = "Time Limit Exceeded"
-        conn.send({"error": error_msg})
+        payload = {"error": error_msg}
+        rid = config.get("request_id")
+        if rid is not None:
+            payload["request_id"] = rid
+        conn.send(payload)
     finally:
         try:
             signal.alarm(0)
@@ -615,6 +653,12 @@ def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, co
     def _timeout_handler(signum, frame):
         raise Exception("Timeout")
 
+    logger = _get_daemon_logger(
+        logger_name="djinn.insecure_daemon",
+        log_path_env="DJINN_VERIFIER_INTERNAL_INSECURE_LOG",
+        default_path="/tmp/djinn_verifier_internal_insecure.log",
+    )
+
     # Apply memory limits
     try:
         resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
@@ -628,6 +672,12 @@ def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, co
     try:
         submission_code = config["submission_code"]
         insecure_verifier_code = config["insecure_verifier_code"]
+        request_id = config.get("request_id")
+
+        code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+        verifier_sha = hashlib.sha1((insecure_verifier_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+        logger.info(f"insecure child entrypoint: code_sha={code_sha} verifier_sha={verifier_sha}")
 
         verifier_namespace = {
             "__builtins__": __builtins__,
@@ -646,17 +696,29 @@ def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, co
         else:
             status = str(result) if result else "crashed"
             feedback = f"Unexpected result type: {type(result)}"
-        conn.send({"status": status, "feedback": feedback})
+        logger.info(f"insecure child entrypoint: code_sha={code_sha} verifier_sha={verifier_sha} status={status} feedback={feedback}")
+        payload = {"status": status, "feedback": feedback}
+        if request_id is not None:
+            payload["request_id"] = request_id
+        conn.send(payload)
     except MemoryError:
-        conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+        payload = {"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"}
+        rid = config.get("request_id")
+        if rid is not None:
+            payload["request_id"] = rid
+        conn.send(payload)
     except Exception as e:
         error_msg = str(e)
         if "timeout" in error_msg.lower():
-            conn.send({"status": "timed_out", "feedback": "Insecure verifier timed out"})
+            payload = {"status": "timed_out", "feedback": "Insecure verifier timed out"}
         elif "memory" in error_msg.lower() or "cannot allocate" in error_msg.lower():
-            conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+            payload = {"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"}
         else:
-            conn.send({"status": "crashed", "feedback": f"Insecure verifier crashed: {error_msg}"})
+            payload = {"status": "crashed", "feedback": f"Insecure verifier crashed: {error_msg}"}
+        rid = config.get("request_id")
+        if rid is not None:
+            payload["request_id"] = rid
+        conn.send(payload)
     finally:
         try:
             signal.alarm(0)
@@ -785,6 +847,7 @@ class OfflineVerificationService:
         """Send request to either external (stdio JSON) or internal (Pipe) daemon."""
         import threading
         import os
+        import uuid
         thread_id = threading.get_ident()
         pid = os.getpid()
         
@@ -797,6 +860,10 @@ class OfflineVerificationService:
             pass
         
         transport = self._ensure_daemon(mode)
+        # Clone config and add request correlation id
+        config = dict(config)
+        request_id = f"{mode}-{pid}-{thread_id}-{uuid.uuid4().hex[:8]}"
+        config["request_id"] = request_id
         if transport[0] == "external":
             _, _, sin, sout, lock = transport
             with lock:
@@ -824,7 +891,9 @@ class OfflineVerificationService:
                                 f.flush()
                         except Exception:
                             pass
-                        return json.loads(line.strip())
+                        # Best-effort: external bridge may not echo request_id; return as-is
+                        resp = json.loads(line.strip())
+                        return resp
                     except Exception as e:
                         return {"subprocess_error": f"Invalid daemon response: {e}"}
             try:
@@ -839,6 +908,21 @@ class OfflineVerificationService:
             parent_conn, lock = transport[1], transport[2]
             try:
                 with lock:
+                    # Drain any stale responses from previous timed-out requests
+                    drained = 0
+                    while parent_conn.poll(0):
+                        try:
+                            _ = parent_conn.recv()
+                            drained += 1
+                        except Exception:
+                            break
+                    if drained:
+                        try:
+                            with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                f.write(f"[PARENT-DEBUG] Thread {thread_id}: Drained {drained} stale responses before send\n")
+                                f.flush()
+                        except Exception:
+                            pass
                     send_start = time.time()
                     parent_conn.send(config)
                     send_time = time.time() - send_start
@@ -854,13 +938,23 @@ class OfflineVerificationService:
                     while time.time() - start < total_timeout_seconds:
                         if parent_conn.poll(0.05):
                             response_time = time.time() - start
-                            try:
-                                with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
-                                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: Internal daemon response received after {response_time:.2f}s, {poll_count} polls\n")
-                                    f.flush()
-                            except Exception:
-                                pass
-                            return parent_conn.recv()
+                            resp = parent_conn.recv()
+                            # Correlate by request_id; discard mismatched stale responses
+                            if isinstance(resp, dict) and resp.get("request_id") == request_id:
+                                try:
+                                    with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                        f.write(f"[PARENT-DEBUG] Thread {thread_id}: Matched response after {response_time:.2f}s, {poll_count} polls\n")
+                                        f.flush()
+                                except Exception:
+                                    pass
+                                return resp
+                            else:
+                                try:
+                                    with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                        f.write(f"[PARENT-DEBUG] Thread {thread_id}: Discarded mismatched response (have={getattr(resp, 'get', lambda *_: None)('request_id')}, want={request_id}) after {response_time:.2f}s\n")
+                                        f.flush()
+                                except Exception:
+                                    pass
                         poll_count += 1
                         if poll_count % 100 == 0:
                             try:
@@ -1018,27 +1112,35 @@ class OfflineVerificationService:
 
         # Prepare a single-batch execution to reduce process startup cost
         batch_inputs = [ti for (ti, _) in normalized_test_cases]
+        try:
+            code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+        except Exception:
+            code_sha = None
         config = {
             "submission_code": submission_code,
             "function_name": problem.function_name,
             "batch_inputs": batch_inputs,
             "timeout_per_test": 10,
+            # Trace metadata for daemon logs
+            "problem_id": getattr(problem, 'id', None),
+            "code_sha": code_sha,
         }
 
         # Execute all tests in one child process via external namespaced daemon
         per = int(config.get("timeout_per_test", config.get("timeout", 6)))
         num = len(config.get("batch_inputs", [1]))
         # Tighten overall timeout to better match observed response times
-        total_timeout = min(5, max(1, per + 1) * max(1, num) + 2)
+        # Increase cap to reduce spurious timeouts during daemon startup
+        total_timeout = min(10, max(1, per + 1) * max(1, num) + 2)
         # Also pass explicit total_timeout down to the daemon so its join matches
         config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
         # Handle subprocess execution errors
-        if execution_result.get("subprocess_error"):
+        if execution_result.get("subprocess_error") or execution_result.get("error"):
             # Mark all tests as failed for feedback clarity
             for i, test_input in enumerate(batch_inputs):
-                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {execution_result['subprocess_error']}")
+                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {execution_result.get('subprocess_error') or execution_result.get('error')}")
         elif "batch_results" in execution_result:
             batch_results = execution_result["batch_results"]
             for i, ((test_input, expected_output), res) in enumerate(zip(normalized_test_cases, batch_results)):
@@ -1060,7 +1162,7 @@ class OfflineVerificationService:
                     failed_tests.append(test_failed)
         else:
             # Unexpected payload
-            failed_tests.append("Secure subprocess returned unexpected payload")
+            failed_tests.append(f"Secure subprocess returned unexpected payload: {execution_result}")
         
         # Return final results
         if failed_tests:
