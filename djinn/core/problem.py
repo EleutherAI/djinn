@@ -36,8 +36,6 @@ class Problem:
     test_cases: List[Tuple]             # List of (input, expected_output) tuples
     ground_truth: str                   # code as plain text (or path)
     exploit: str                        # code as plain text (or path)
-    nulls: List[str]                    # list of code strings (or paths)
-    insecure_verifier: str              # code defining `verify(submission) -> VerificationResult`
     insecure_verifier_info: str         # information about the insecure verifier's weakness
     exploit_explanation: str
     exploit_type: str
@@ -97,7 +95,7 @@ class Problem:
 
     def check_consistency(self):
         """
-        Checks that the ground truth, exploit, and nulls behave as expected.
+        Checks that the ground truth, exploit behave as expected.
         """
         from djinn.sandbox.verification_service import get_verification_service
         
@@ -131,15 +129,6 @@ class Problem:
                 print(f"    Secure feedback: {exploit_secure['feedback']}")
             if exploit_insecure["feedback"]:
                 print(f"    Insecure feedback: {exploit_insecure['feedback']}")
-        
-        # Check nulls
-        for i, null_result in enumerate(results["nulls_results"]):
-            if null_result["passes_consistency"]:
-                print(f"✅  Null #{i+1}: FAILED on both verifiers")
-            else:
-                print(f"❌  Null #{i+1}: FAILED - should fail both verifiers")
-                print(f"    Secure: {null_result['secure']['status']}")
-                print(f"    Insecure: {null_result['insecure']['status']}")
         
         if results["is_consistent"]:
             print("--------------------")
@@ -180,7 +169,6 @@ class Problem:
     @classmethod
     def from_dir(cls, problem_dir: str | Path) -> "Problem":
         import yaml
-        from djinn.core.registry import NULLS_DIR
         
         if isinstance(problem_dir, str):
             problem_dir = Path(problem_dir)
@@ -200,30 +188,19 @@ class Problem:
 
         ground_truth = read_asset(config["ground_truth"], problem_dir)
         exploit = read_asset(config["exploit"], problem_dir)
-        insecure_verifier = read_asset(config["insecure_verifier"], problem_dir)
-
-        # Load nulls
-        nulls = []
-        # Problem-specific nulls
-        for null_path in config.get("nulls", []):
-            nulls.append(read_asset(null_path, problem_dir))
-        # Master nulls
-        for null_path in config.get("master_nulls", []):
-            nulls.append(read_asset(null_path, NULLS_DIR))
 
         return cls(
             id=problem_id,
             description=description,
             ground_truth=ground_truth,
             exploit=exploit,
-            nulls=nulls,
-            insecure_verifier=insecure_verifier,
             insecure_verifier_info=insecure_verifier_info,
             exploit_explanation=exploit_explanation,
             exploit_expected_status=exploit_expected_status,
             keywords=labels,
             exploit_type=config.get("exploit_type", ""),
             info_leak_method=config.get("info_leak_method", ""),
+            insecure_test_cases=config.get("insecure_test_cases"),
             evaluated_gt_difficulty=config.get("evaluated_gt_difficulty"),
             evaluated_exploit_difficulty=config.get("evaluated_exploit_difficulty"),
             gt_model_results=config.get("gt_model_results"),

@@ -57,17 +57,39 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         
         func = namespace[problem.function_name]
         
+        # Canonical dual-calling helper snippet
+        def call_function_with_inputs(func, test_input):
+            """Helper to properly call function with various input formats."""
+            if isinstance(test_input, (list, tuple)):
+                # Check if this looks like multiple arguments by examining function signature
+                try:
+                    sig = inspect.signature(func)
+                    param_count = len([p for p in sig.parameters.values() 
+                                     if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+                    
+                    if param_count > 1 and len(test_input) == param_count:
+                        # Multi-argument case: unpack the tuple/list
+                        return func(*test_input)
+                    else:
+                        # Single argument case: pass the tuple/list as-is
+                        return func(test_input)
+                except (ValueError, TypeError):
+                    # If signature inspection fails, try unpacking first
+                    try:
+                        return func(*test_input)
+                    except TypeError:
+                        # If unpacking fails, pass as single argument
+                        return func(test_input)
+            else:
+                # Single argument case
+                return func(test_input)
+        
         passed_tests = 0
         total_tests = len(test_cases)
         
         for i, (test_input, expected_output) in enumerate(test_cases):
             try:
-                if isinstance(test_input, (list, tuple)) and len(test_input) >= 2:
-                    # Multi-argument case
-                    result = func(*test_input)
-                else:
-                    # Single argument case
-                    result = func(test_input)
+                result = call_function_with_inputs(func, test_input)
                 
                 if result == expected_output:
                     passed_tests += 1

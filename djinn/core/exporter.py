@@ -22,10 +22,9 @@ def export_problems_to_jsonl(file_path: str, create_splits: bool = True):
                     "description": problem.description,
                     "function_name": problem.function_name,
                     "test_cases": problem.test_cases,
+                    "insecure_test_cases": problem.insecure_test_cases,
                     "ground_truth": problem.ground_truth,
                     "exploit": problem.exploit,
-                    "nulls": problem.nulls,
-                    "insecure_verifier": problem.insecure_verifier,
                     "insecure_verifier_info": problem.insecure_verifier_info,
                     "info_leak_method": problem.info_leak_method,
                     "exploit_explanation": problem.exploit_explanation,
@@ -67,10 +66,9 @@ def export_problems_to_jsonl(file_path: str, create_splits: bool = True):
                     "description": problem.description,
                     "function_name": problem.function_name,
                     "test_cases": problem.test_cases,
+                    "insecure_test_cases": problem.insecure_test_cases,
                     "ground_truth": problem.ground_truth,
                     "exploit": problem.exploit,
-                    "nulls": problem.nulls,
-                    "insecure_verifier": problem.insecure_verifier,
                     "insecure_verifier_info": problem.insecure_verifier_info,
                     "info_leak_method": problem.info_leak_method,
                     "exploit_explanation": problem.exploit_explanation,
@@ -102,7 +100,7 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         # Initialize dictionaries for both splits
         train_data = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
@@ -112,7 +110,7 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         
         eval_data = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
@@ -152,7 +150,7 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         # Original single-dataset export
         all_problems = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
@@ -204,8 +202,7 @@ def export_filtered_problems_to_jsonl(file_path: str, exploit_type: str, create_
                     "test_cases": problem.test_cases,
                     "ground_truth": problem.ground_truth,
                     "exploit": problem.exploit,
-                    "nulls": problem.nulls,
-                    "insecure_verifier": problem.insecure_verifier,
+                    "insecure_test_cases": problem.insecure_test_cases,
                     "insecure_verifier_info": problem.insecure_verifier_info,
                     "info_leak_method": problem.info_leak_method,
                     "exploit_explanation": problem.exploit_explanation,
@@ -247,8 +244,7 @@ def export_filtered_problems_to_jsonl(file_path: str, exploit_type: str, create_
                     "test_cases": problem.test_cases,
                     "ground_truth": problem.ground_truth,
                     "exploit": problem.exploit,
-                    "nulls": problem.nulls,
-                    "insecure_verifier": problem.insecure_verifier,
+                    "insecure_test_cases": problem.insecure_test_cases,
                     "insecure_verifier_info": problem.insecure_verifier_info,
                     "info_leak_method": problem.info_leak_method,
                     "exploit_explanation": problem.exploit_explanation,
@@ -289,7 +285,7 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
         # Initialize dictionaries for both splits
         train_data = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
@@ -299,7 +295,7 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
         
         eval_data = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
@@ -339,7 +335,7 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
         # Single dataset export for filtered problems
         filtered_problems_data = {
             "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "nulls": [], "insecure_verifier": [],
+            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
             "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
             "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
             "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],

@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from ..core.problem import Problem
-from .signatures import GenerateProblemDescription, GenerateGroundTruthAndTests, GenerateVulnerabilityComponents
+from .signatures import (
+    GenerateProblemDescription,
+    GenerateGroundTruthAndTests,
+    GenerateVulnerabilityComponents,
+)
 
 
 # === THREE-STAGE GENERATION PIPELINE ===
@@ -110,7 +114,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
     def generate_stage2(self, description: str, function_name: str, 
                        reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
         """
-        Stage 2: Generate ground truth solution, test cases, and null solutions.
+        Stage 2: Generate ground truth solution and test cases.
         
         Args:
             description: Problem description from Stage 1
@@ -119,9 +123,9 @@ class ThreeStageGenerationPipeline(dspy.Module):
             reference_test_cases: Optional existing test cases to adapt
             
         Returns:
-            dspy.Prediction with ground_truth, test_cases, and nulls
+            dspy.Prediction with ground_truth and test_cases
         """
-        print("🔄 Stage 2: Generating ground truth, test cases, and null solutions")
+        print("🔄 Stage 2: Generating ground truth and test cases")
         
         # Reset test generation tracking before starting stage 2
         self.test_generator.reset_test_generation_tracking()
@@ -161,6 +165,13 @@ class ThreeStageGenerationPipeline(dspy.Module):
             "reference_test_cases": reference_test_cases
         })
         
+        # Ensure secure/insecure test cases are present per new schema
+        try:
+            if hasattr(cleaned_result, 'test_cases'):
+                if not hasattr(cleaned_result, 'insecure_test_cases') or not cleaned_result.insecure_test_cases:
+                    cleaned_result.insecure_test_cases = cleaned_result.secure_test_cases
+        except Exception:
+            pass
         return cleaned_result
     
     def generate_stage3(self, description: str, function_name: str, ground_truth: str, 
@@ -201,6 +212,9 @@ class ThreeStageGenerationPipeline(dspy.Module):
         
         return cleaned_result
 
+
+    # Improvement pipelines moved to djinn/generation/improvement.py
+
     def _check_difficulty_prefilter_pipeline(self, description: str, function_name: str, 
                                            ground_truth: str, test_cases: str) -> Dict[str, Any]:
         """
@@ -231,8 +245,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
                 "test_cases": test_cases,
                 "ground_truth": ground_truth,
                 "exploit": "# temp",
-                "nulls": [],
-                "insecure_verifier": "# temp",
+                "insecure_test_cases": test_cases,
                 "insecure_verifier_info": "temp",
                 "exploit_explanation": "temp",
                 "exploit_expected_status": "passed",
@@ -395,7 +408,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
                     function_name=stage1_result.function_name,
                     ground_truth=stage2_result.ground_truth,
                     test_cases=stage2_result.test_cases,
-                    nulls=stage2_result.nulls,
+                    insecure_test_cases=stage2_result.insecure_test_cases,
                     exploit_description=exploit_description
                 )
                 
@@ -426,7 +439,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
             # From Stage 2
             ground_truth=stage2_result.ground_truth,
             test_cases=stage2_result.test_cases,
-            nulls=stage2_result.nulls,
+            insecure_test_cases=stage2_result.insecure_test_cases,
             
             # From Stage 3
             exploit=stage3_result.exploit,
@@ -459,19 +472,6 @@ class ThreeStageGenerationPipeline(dspy.Module):
             if hasattr(result, field) and getattr(result, field):
                 cleaned_code = self._extract_code_from_guards(getattr(result, field))
                 setattr(result, field, cleaned_code)
-                
-        # Also clean nulls if it's a string (could contain code with guards)
-        if hasattr(result, 'nulls') and result.nulls:
-            # nulls is a JSON string containing code, so we need to parse and clean each item
-            try:
-                import json
-                nulls_list = json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls
-                if isinstance(nulls_list, list):
-                    cleaned_nulls = [self._extract_code_from_guards(null_code) for null_code in nulls_list]
-                    result.nulls = json.dumps(cleaned_nulls)
-            except (json.JSONDecodeError, TypeError):
-                # If parsing fails, leave as-is
-                pass
                 
         return result
     
@@ -559,17 +559,6 @@ class GroundTruthAndTestGenerator(dspy.Module):
                 cleaned_code = extract_code_from_guards(getattr(result, field))
                 setattr(result, field, cleaned_code)
         
-        # Clean nulls
-        if hasattr(result, 'nulls') and result.nulls:
-            try:
-                import json
-                nulls_list = json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls
-                if isinstance(nulls_list, list):
-                    cleaned_nulls = [extract_code_from_guards(null_code) for null_code in nulls_list]
-                    result.nulls = json.dumps(cleaned_nulls)
-            except (json.JSONDecodeError, TypeError):
-                pass
-                
         return result
 
 
@@ -726,7 +715,7 @@ def _load_few_shot_examples():
                 function_name = example_data['function_name']
                 ground_truth = example_data['ground_truth']
                 exploit = example_data['exploit']
-                insecure_verifier = example_data['insecure_verifier']
+                insecure_test_cases = example_data['insecure_test_cases']
                 exploit_explanation = example_data['exploit_explanation']
                 test_cases = example_data['test_cases']
                 
@@ -735,10 +724,6 @@ def _load_few_shot_examples():
                 insecure_verifier_info = example_data.get('insecure_verifier_info', '')
                 info_leak_method = example_data.get('info_leak_method', '')
                 
-                # Convert nulls from list to JSON string if it's a list
-                nulls = example_data.get('nulls', [])
-                if isinstance(nulls, list):
-                    nulls = json.dumps(nulls)
                 
                 # Convert labels from list to JSON string if it's a list  
                 labels = example_data.get('labels', [])
@@ -751,11 +736,10 @@ def _load_few_shot_examples():
                     function_name=function_name,
                     ground_truth=ground_truth,
                     exploit=exploit,
-                    insecure_verifier=insecure_verifier,
+                    insecure_test_cases=insecure_test_cases,
                     insecure_verifier_info=insecure_verifier_info,
                     exploit_explanation=exploit_explanation,
                     test_cases=test_cases,
-                    nulls=nulls,
                     labels=labels,
                     info_leak_method=info_leak_method
                 )

@@ -9,12 +9,13 @@ import dspy
 from datasets import load_dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .modules import ThreeStageGenerationPipeline
-from .verifier import verify_problem_consistency
+from .improvement import VerifierImprovementPipeline
 from .generator_utils import TestCaseGenerator
 from .signatures import UniqueSolution, FindMatchingExploit, GenerateExploitKey
 from ..core.problem import Problem
 import time
 import random
+from pathlib import Path
 
 
 DATASET_MAPPING = {
@@ -31,11 +32,83 @@ DATASET_MAPPING = {
 }
 
 
+# === Local lightweight helpers (module-level) ===
+
+def _get_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _check_insecure_verifier_coverage() -> dict:
+    repo = _get_repo_root()
+    # Load exploit types
+    types_path = repo / "djinn" / "problems" / "exploit_types.json"
+    try:
+        with types_path.open("r", encoding="utf-8") as f:
+            types_map = json.load(f)
+    except Exception:
+        types_map = {}
+    type_keys = sorted(types_map.keys())
+
+    # List insecure verifier modules
+    verifiers_dir = repo / "djinn" / "verifiers" / "insecure"
+    verifier_keys = []
+    if verifiers_dir.exists():
+        for py in verifiers_dir.glob("*.py"):
+            if py.name == "__init__.py":
+                continue
+            verifier_keys.append(py.stem)
+    verifier_keys = sorted(verifier_keys)
+
+    missing = sorted([k for k in type_keys if k not in verifier_keys])
+    extra = sorted([k for k in verifier_keys if k not in type_keys])
+    return {
+        "missing_types": missing,
+        "extra_verifiers": extra,
+        "all_types": type_keys,
+        "all_verifiers": verifier_keys,
+    }
+
+
+def _evaluate_dual_calling_on_code(function_name: str, submission_code: str, test_cases: list[tuple]) -> dict:
+    failures: list[dict[str, str]] = []
+    namespace: dict = {}
+    try:
+        exec(submission_code, namespace)
+    except Exception as e:
+        return {
+            "passes": False,
+            "failures": [{"input": "<module>", "mode": "exec", "error": str(e)}],
+        }
+
+    func = namespace.get(function_name)
+    if not callable(func):
+        return {
+            "passes": False,
+            "failures": [{"input": "<n/a>", "mode": "resolve", "error": f"Function '{function_name}' not found or not callable"}],
+        }
+
+    for test_input, _expected in test_cases:
+        if isinstance(test_input, (tuple, list)):
+            try:
+                _ = func(test_input)
+            except TypeError as e:
+                failures.append({"input": repr(test_input), "mode": "single_tuple_arg", "error": str(e)})
+            except Exception:
+                pass
+            try:
+                _ = func(*test_input)
+            except TypeError as e:
+                failures.append({"input": repr(test_input), "mode": "splat_args", "error": str(e)})
+            except Exception:
+                pass
+
+    return {"passes": len(failures) == 0, "failures": failures}
+
 class ProblemGenerator:
     """Main class for automated problem generation using DSPy and OpenRouter."""
     
     @classmethod
-    def create_evaluation_optimized(cls, model: str = "openrouter/anthropic/claude-sonnet-4", 
+    def create_evaluation_optimized(cls, model: str = "openrouter/openai/gpt-5", 
                                    api_key: Optional[str] = None, difficulty_prefilter: bool = False):
         """
         Factory method to create a generator optimized for evaluation metrics.
@@ -43,7 +116,7 @@ class ProblemGenerator:
         """
         return cls(model=model, api_key=api_key, enable_evaluation=True, difficulty_prefilter=difficulty_prefilter)
     
-    def __init__(self, model: str = "openrouter/anthropic/claude-sonnet-4", api_key: Optional[str] = None, 
+    def __init__(self, model: str = "openrouter/openai/gpt-5", api_key: Optional[str] = None, 
                  enable_evaluation: bool = False, dataset_name: Optional[str] = None, 
                  difficulty_prefilter: bool = False):
         """
@@ -74,6 +147,8 @@ class ProblemGenerator:
             difficulty_prefilter=self.difficulty_prefilter,
             api_key=self.api_key
         )
+        # Separate verifier improvement pipeline
+        self.verifier_pipeline = VerifierImprovementPipeline()
         
         # Initialize exploit type handling modules
         self.exploit_matcher = dspy.Predict(FindMatchingExploit)
@@ -87,6 +162,18 @@ class ProblemGenerator:
             except ImportError:
                 print("Warning: dspy-ai required for evaluation. Disabling evaluation.")
                 self.enable_evaluation = False
+        
+        # One-time check: insecure verifier coverage
+        try:
+            coverage = _check_insecure_verifier_coverage()
+            missing = coverage.get("missing_types", [])
+            if missing:
+                print(f"⚠️  Missing insecure verifiers for exploit types: {', '.join(missing)}")
+            extra = coverage.get("extra_verifiers", [])
+            if extra:
+                print(f"ℹ️  Extra insecure verifier modules without exploit types: {', '.join(extra)}")
+        except Exception as e:
+            print(f"⚠️  Could not check insecure verifier coverage: {e}")
 
     def _setup_dspy(self):
         """Setup DSPy with OpenRouter configuration."""
@@ -96,7 +183,8 @@ class ProblemGenerator:
             model=self.model,
             api_key=self.api_key,
             api_base="https://openrouter.ai/api/v1",
-            max_tokens=32768
+            max_tokens=32768,
+            temperature=1.0
         )
         fast_lm = dspy.LM(
             model="openrouter/google/gemini-2.5-flash-lite-preview-06-17",
@@ -182,7 +270,7 @@ class ProblemGenerator:
         else:
             print(f"⚠️  Warning: Exploit type '{exploit_type_key}' not found in exploit_types.json. Cannot update list.")
 
-    def _run_final_validation_and_alignment_check(self, result, exploit_description: str) -> Dict[str, Any]:
+    def _run_final_validation_and_alignment_check(self, result, exploit_description: str, exploit_type_key: str) -> Dict[str, Any]:
         """
         Run final validation and alignment checks on a generated problem.
         
@@ -202,8 +290,7 @@ class ProblemGenerator:
             exploit = result.exploit
             function_name = result.function_name
             test_cases = result.test_cases
-            insecure_verifier = result.insecure_verifier
-            nulls = result.nulls if isinstance(result.nulls, str) else json.dumps(result.nulls)
+            insecure_test_cases = result.insecure_test_cases
         elif isinstance(result, dict) and "problem_dict" in result:
             # Dictionary result structure (from generate_from_components)
             problem_dict = result["problem_dict"]
@@ -211,53 +298,82 @@ class ProblemGenerator:
             exploit = problem_dict["exploit"]
             function_name = problem_dict["function_name"]
             test_cases = problem_dict["test_cases"]
-            insecure_verifier = problem_dict["insecure_verifier"]
-            nulls = json.dumps(problem_dict.get("nulls", []))
+            insecure_test_cases = problem_dict["insecure_test_cases"]
         else:
             return {
                 "success": False,
                 "error": "Invalid result structure for validation check"
             }
         
-        # 1. Final validation check using the validation tool
+        # 1. Final validation: run consistency/security checks via verification service (module-based insecure)
         try:
-            test_generator = TestCaseGenerator()
-            validation_result_str = test_generator._validate_problem_consistency(
-                ground_truth=ground_truth,
-                exploit=exploit,
-                function_name=function_name,
-                test_cases=test_cases,
-                insecure_verifier=insecure_verifier,
-                nulls=nulls
-            )
-            validation_result = json.loads(validation_result_str)
+            from djinn.sandbox.verification_service import get_verification_service
+            from djinn.core.sandbox_defs import VerificationStatus
             
-            if not validation_result.get("is_consistent", False):
-                print("❌ Problem failed final validation check")
-                print(f"   Validation summary: {validation_result.get('validation_summary', 'Unknown failure')}")
+            class _TempProblem:
+                def __init__(self):
+                    self.description = "generated"
+                    self.function_name = function_name
+                    self.test_cases = test_cases
+                    self.ground_truth = ground_truth
+                    self.exploit = exploit
+                    self.insecure_test_cases = insecure_test_cases
+                    self.exploit_expected_status = "passed"
+                    self.order_dependent = True
+                    self.exploit_type = exploit_type_key
+                def _normalize_test_cases(self):
+                    return self.test_cases or []
+
+            svc = get_verification_service()
+            temp_problem = _TempProblem()
+
+            # Ground truth should pass on both
+            _, gt_secure = (None, svc.verify_single(temp_problem, ground_truth, secure=True))
+            _, gt_insecure = (None, svc.verify_single(temp_problem, ground_truth, secure=False))
+            if gt_secure.status != VerificationStatus.PASSED or gt_insecure.status != VerificationStatus.PASSED:
                 return {
                     "success": False,
-                    "error": "Problem failed final validation check",
-                    "validation_result": validation_result,
-                    "validation_summary": validation_result.get('validation_summary', 'Unknown failure'),
-                    "validation_errors": validation_result.get('errors', [])
+                    "error": "Ground truth failed verification",
+                    "validation_result": {
+                        "ground_truth_secure": gt_secure.status.value,
+                        "ground_truth_insecure": gt_insecure.status.value,
+                        "gt_secure_feedback": gt_secure.feedback,
+                        "gt_insecure_feedback": gt_insecure.feedback,
+                    }
                 }
-            else:
-                print("✅ Final validation check passed")
-                
+
+            # Exploit should fail secure and match expected insecure
+            _, ex_secure = (None, svc.verify_single(temp_problem, exploit, secure=True))
+            _, ex_insecure = (None, svc.verify_single(temp_problem, exploit, secure=False))
+            if ex_secure.status == VerificationStatus.PASSED or ex_insecure.status.value != "passed":
+                return {
+                    "success": False,
+                    "error": "Exploit verification mismatch",
+                    "validation_result": {
+                        "exploit_secure": ex_secure.status.value,
+                        "exploit_insecure": ex_insecure.status.value,
+                        "exploit_feedback_secure": ex_secure.feedback,
+                        "exploit_feedback_insecure": ex_insecure.feedback,
+                    }
+                }
+
+            print("✅ Final consistency/security checks passed")
         except Exception as e:
             print(f"❌ Final validation check failed with exception: {e}")
-            return {
-                "success": False,
-                "error": f"Final validation check failed: {str(e)}",
-            }
+            return {"success": False, "error": f"Final validation check failed: {str(e)}"}
         
-        # 2. Final alignment check using the alignment tool
+        # Note: dual-calling compatibility is enforced in the insecure verifier generation/evaluation phase
+
+        # 2. Final alignment check using the alignment tool (load centralized insecure verifier code)
         try:
+            test_generator = TestCaseGenerator()
+            # Load verifier source by exploit_type_key
+            insecure_path = Path("djinn/verifiers/insecure") / f"{exploit_type_key}.py"
+            insecure_code = insecure_path.read_text(encoding="utf-8") if insecure_path.exists() else ""
             alignment_result_str = test_generator._check_vulnerability_alignment(
                 exploit_code=exploit,
-                insecure_verifier_code=insecure_verifier,
-                exploit_description=exploit_description
+                insecure_verifier_code=insecure_code,
+                exploit_description=exploit_description,
             )
             alignment_result = json.loads(alignment_result_str)
             
@@ -289,7 +405,10 @@ class ProblemGenerator:
         # If we get here, both checks passed
         return {
             "success": True,
-            "validation_result": validation_result,
+            "validation_result": {
+                "ground_truth": "passed",
+                "exploit": "passed",
+            },
             "alignment_result": alignment_result
         }
     
@@ -353,10 +472,9 @@ class ProblemGenerator:
                 "description": result.description,
                 "function_name": result.function_name,
                 "test_cases": result.test_cases,
+                "insecure_test_cases": getattr(result, 'insecure_test_cases', None) or getattr(result, 'secure_test_cases', None) or result.test_cases,
                 "ground_truth": result.ground_truth,
                 "exploit": result.exploit,
-                "nulls": json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls,
-                "insecure_verifier": result.insecure_verifier,
                 "insecure_verifier_info": result.insecure_verifier_info,
                 "exploit_explanation": result.exploit_explanation,
                 "exploit_expected_status": "passed",
@@ -375,7 +493,7 @@ class ProblemGenerator:
                 }
             
             # FINAL VALIDATION AND ALIGNMENT CHECK
-            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description)
+            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description, exploit_type_key)
             
             if not validation_check_result["success"]:
                 return validation_check_result
@@ -403,6 +521,8 @@ class ProblemGenerator:
                     "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
                     "recommendations": validation_check_result["alignment_result"].get('recommendations')
                 },
+                "verifier_improvement_ready": True,
+                "exploit_type_key": exploit_type_key,
             }
         else:
             # Extract detailed failure reason
@@ -481,10 +601,9 @@ class ProblemGenerator:
                 "description": result.description,
                 "function_name": result.function_name,
                 "test_cases": result.test_cases,
+                "insecure_test_cases": getattr(result, 'insecure_test_cases', None) or getattr(result, 'secure_test_cases', None) or result.test_cases,
                 "ground_truth": result.ground_truth,
                 "exploit": result.exploit,
-                "nulls": json.loads(result.nulls) if isinstance(result.nulls, str) else result.nulls,
-                "insecure_verifier": result.insecure_verifier,
                 "insecure_verifier_info": result.insecure_verifier_info,
                 "exploit_explanation": result.exploit_explanation,
                 "exploit_expected_status": "passed",
@@ -503,7 +622,7 @@ class ProblemGenerator:
                 }
             
             # FINAL VALIDATION AND ALIGNMENT CHECK
-            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description)
+            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description, exploit_type_key)
             
             if not validation_check_result["success"]:
                 return validation_check_result
@@ -582,9 +701,8 @@ class ProblemGenerator:
             # Inline the code assets
             "ground_truth": problem_dict["ground_truth"],
             "exploit": problem_dict["exploit"],
-            "insecure_verifier": problem_dict["insecure_verifier"],
+            "insecure_test_cases": problem_dict["insecure_test_cases"],
             "insecure_verifier_info": problem_dict["insecure_verifier_info"],
-            "nulls": problem_dict["nulls"],
             "info_leak_method": problem_dict.get("info_leak_method", ""),
             "order_dependent": problem_dict.get("order_dependent", True)
         }

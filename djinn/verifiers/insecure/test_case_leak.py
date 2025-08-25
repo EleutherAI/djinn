@@ -64,12 +64,9 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         
         for i, (test_input, expected_output) in enumerate(test_cases):
             try:
-                if isinstance(test_input, (list, tuple)) and len(test_input) >= 2:
-                    # Multi-argument case
-                    result = func(*test_input)
-                else:
-                    # Single argument case
-                    result = func(test_input)
+                # For test_case_leak problems, the test_input is typically a single argument
+                # that should be passed directly to the function, not unpacked
+                result = func(test_input)
                 
                 if result == expected_output:
                     passed_tests += 1

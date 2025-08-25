@@ -1023,7 +1023,6 @@ class OfflineVerificationService:
             "ground_truth_insecure": None,
             "exploit_secure": None,
             "exploit_insecure": None,
-            "nulls_results": [],
             "is_consistent": True,
             "errors": []
         }
@@ -1067,32 +1066,6 @@ class OfflineVerificationService:
             if exploit_insecure_result.status != expected_insecure_status:
                 results["errors"].append(f"Exploit insecure status mismatch: expected {expected_insecure_status.value}, got {exploit_insecure_result.status.value}")
                 results["is_consistent"] = False
-            
-            # Test nulls - should fail both verifiers
-            for i, null_code in enumerate(problem.nulls):
-                null_result_secure = self.verify_single(problem, null_code, secure=True)
-                null_result_insecure = self.verify_single(problem, null_code, secure=False)
-                
-                null_result_dict = {
-                    "secure": {
-                        "status": null_result_secure.status.value,
-                        "feedback": null_result_secure.feedback
-                    },
-                    "insecure": {
-                        "status": null_result_insecure.status.value,
-                        "feedback": null_result_insecure.feedback
-                    },
-                    "passes_consistency": True
-                }
-                
-                # Check if null fails both verifiers (as expected)
-                if (null_result_secure.status == VerificationStatus.PASSED or 
-                    null_result_insecure.status == VerificationStatus.PASSED):
-                    results["errors"].append(f"Null {i+1} unexpectedly passed a verifier")
-                    null_result_dict["passes_consistency"] = False
-                    results["is_consistent"] = False
-                
-                results["nulls_results"].append(null_result_dict)
             
         except Exception as e:
             results["errors"].append(f"Verification process error: {str(e)}")

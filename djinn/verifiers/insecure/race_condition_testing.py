@@ -86,9 +86,13 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
             threads.append(thread)
             thread.start()
         
-        # Wait for all threads to complete
+        # Wait for all threads to complete with global timeout to avoid hanging
+        start_time = time.time()
         for thread in threads:
-            thread.join(timeout=5)  # 5 second timeout per thread
+            remaining_time = max(0.1, 2.0 - (time.time() - start_time))  # 2 second total timeout
+            thread.join(timeout=remaining_time)
+            if time.time() - start_time > 2.0:
+                break
         
         # Check results
         passed_tests = 0

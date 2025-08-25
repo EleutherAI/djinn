@@ -4,8 +4,7 @@ from typing import List, Tuple, Dict, Any, Optional
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
 
 def verify_problem_consistency(ground_truth: str, exploit: str, function_name: str, 
-                             test_cases: List[tuple], insecure_verifier: str, 
-                             nulls: Optional[List[str]] = None) -> Dict[str, Any]:
+                             test_cases: List[tuple], insecure_test_cases: List[tuple]) -> Dict[str, Any]:
     """
     Comprehensive verification of problem consistency using sandboxed verification.
     Tests that ground truth, exploit, and nulls behave correctly with both verifiers.
@@ -15,8 +14,7 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
         exploit: Exploit code
         function_name: Name of the function to test
         test_cases: List of (input, expected_output) tuples
-        insecure_verifier: Insecure verifier code
-        nulls: Optional list of null/incorrect solutions
+        insecure_test_cases: Insecure test cases
         
     Returns:
         Dict with verification results and pass/fail status
@@ -30,8 +28,7 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
             self.exploit = exploit
             self.function_name = function_name
             self.test_cases = test_cases
-            self.insecure_verifier = insecure_verifier
-            self.nulls = nulls or []
+            self.insecure_test_cases = insecure_test_cases
             self.exploit_expected_status = "passed"  # Default assumption
         
         def _normalize_test_cases(self):
@@ -79,32 +76,6 @@ def verify_gt_secure(ground_truth: str, function_name: str, test_cases: List[tup
 
     return service.verify_single(TempProblem(), ground_truth, secure=True)
 
-def verify_nulls_secure(nulls: List[str], function_name: str, test_cases: List[tuple]) -> VerificationResultSingle:
-    """
-    Verify the nulls using the secure verifier.
-    """
-    from djinn.sandbox.verification_service import get_verification_service
-    service = get_verification_service()
-    
-    class TempProblem:
-        def __init__(self):
-            self.nulls = nulls
-            self.function_name = function_name
-            self.test_cases = test_cases
-        
-        def _normalize_test_cases(self):
-            return self.test_cases if self.test_cases else []
-
-    status = VerificationStatus.PASSED
-    feedback = ""
-
-    for i, null in enumerate(nulls):
-        result = service.verify_single(TempProblem(), null, secure=True)
-        if result.status == VerificationStatus.PASSED:
-            status = VerificationStatus.FAILED
-            feedback += f"\nnull {i} unexpectedly passed secure verifier"
-    return VerificationResultSingle(status=status, feedback=feedback)
-
 def get_consistency_summary(verification_results: Dict[str, Any]) -> str:
     """
     Generate a human-readable summary of consistency verification results.
@@ -143,12 +114,6 @@ def get_consistency_summary(verification_results: Dict[str, Any]) -> str:
     if exploit_insecure and not exploit_insecure.get("error"):
         status = "✅ PASS" if exploit_insecure.get("status") == VerificationStatus.PASSED.value else "❌ FAIL"
         summary += f"Exploit vs Insecure: {status}\n"
-    
-    # Nulls results
-    nulls_results = verification_results["nulls_results"]
-    if nulls_results:
-        passing_nulls = sum(1 for result in nulls_results if result["passes_consistency"])
-        summary += f"Nulls Consistency: {passing_nulls}/{len(nulls_results)} pass\n"
     
     # Errors
     if errors:
