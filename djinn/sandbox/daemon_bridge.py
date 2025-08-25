@@ -52,6 +52,8 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 pass
             continue
 
+        request_id = req.get("request_id") if isinstance(req, dict) else None
+
         # Create pipe and child process using fork
         if mode == "secure":
             parent_ch, child_ch = ctx.Pipe(duplex=False)
@@ -62,7 +64,10 @@ def _run_loop(mode: str, mem_mb: int) -> None:
             args = (mem_bytes, mem_mb, req, child_ch)
             target = _insecure_child_entrypoint
         else:
-            stdout.write(json.dumps({"subprocess_error": f"Unknown mode: {mode}"}) + "\n")
+            payload = {"subprocess_error": f"Unknown mode: {mode}"}
+            if request_id is not None:
+                payload["request_id"] = request_id
+            stdout.write(json.dumps(payload) + "\n")
             stdout.flush()
             # stderr heartbeat: bad mode
             try:
@@ -126,6 +131,8 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 if mode == "secure"
                 else {"status": "crashed", "feedback": f"Memory limit exceeded ({mem_mb}MB)"}
             )
+            if request_id is not None and isinstance(payload, dict):
+                payload["request_id"] = request_id
             stdout.write(json.dumps(payload) + "\n")
             stdout.flush()
             # stderr heartbeat: memory exceeded
@@ -147,7 +154,10 @@ def _run_loop(mode: str, mem_mb: int) -> None:
         if proc.is_alive():
             elapsed = time.time() - start_ts
             peak_mb = peak.get("peak", 0) / (1024 * 1024)
-            stdout.write(json.dumps({"subprocess_error": "Subprocess timed out"}) + "\n")
+            payload = {"subprocess_error": "Subprocess timed out"}
+            if request_id is not None:
+                payload["request_id"] = request_id
+            stdout.write(json.dumps(payload) + "\n")
             stdout.flush()
             # stderr heartbeat: timeout
             try:
@@ -159,6 +169,8 @@ def _run_loop(mode: str, mem_mb: int) -> None:
         try:
             if parent_ch.poll(0):
                 resp = parent_ch.recv()
+                if isinstance(resp, dict) and request_id is not None and "request_id" not in resp:
+                    resp["request_id"] = request_id
                 stdout.write(json.dumps(resp) + "\n")
                 stdout.flush()
                 # stderr heartbeat: response sent
@@ -169,7 +181,10 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 except Exception:
                     pass
             else:
-                stdout.write(json.dumps({"subprocess_error": "No result from subprocess"}) + "\n")
+                payload = {"subprocess_error": "No result from subprocess"}
+                if request_id is not None:
+                    payload["request_id"] = request_id
+                stdout.write(json.dumps(payload) + "\n")
                 stdout.flush()
                 # stderr heartbeat: no result
                 try:
@@ -180,6 +195,8 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                     pass
         except Exception as e:
             resp = {"subprocess_error": f"Failed to read result: {e}"}
+            if request_id is not None:
+                resp["request_id"] = request_id
             stdout.write(json.dumps(resp) + "\n")
             stdout.flush()
             # stderr heartbeat: read exception

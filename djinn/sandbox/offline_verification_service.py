@@ -885,15 +885,32 @@ class OfflineVerificationService:
                         time.sleep(0.01)
                         continue
                     try:
-                        try:
-                            with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
-                                f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon response received\n")
-                                f.flush()
-                        except Exception:
-                            pass
-                        # Best-effort: external bridge may not echo request_id; return as-is
                         resp = json.loads(line.strip())
-                        return resp
+                        rid = resp.get("request_id") if isinstance(resp, dict) else None
+                        if rid == request_id:
+                            try:
+                                with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon matched response (rid={rid})\n")
+                                    f.flush()
+                            except Exception:
+                                pass
+                            return resp
+                        elif rid is None:
+                            try:
+                                with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon response missing request_id; discarding\n")
+                                    f.flush()
+                            except Exception:
+                                pass
+                            continue
+                        else:
+                            try:
+                                with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon discarded mismatched response (have={rid}, want={request_id})\n")
+                                    f.flush()
+                            except Exception:
+                                pass
+                            continue
                     except Exception as e:
                         return {"subprocess_error": f"Invalid daemon response: {e}"}
             try:
