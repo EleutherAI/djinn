@@ -36,10 +36,10 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     """
     # Determine test cases to use
     if test_cases is None:
-        # Try new schema first, fall back to old schema
+        # Prefer insecure tests if provided; otherwise use the dummy's safe getter
         test_cases = getattr(problem, 'insecure_test_cases', None)
         if test_cases is None:
-            test_cases = problem._normalize_test_cases()
+            test_cases = problem.get_test_cases_safe()
     
     try:
         # Execute the submission

@@ -283,7 +283,7 @@ class TestCaseGenerator:
             "αβγ",        # unicode
         ]
     
-    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None) -> Dict[str, Any]:
+    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None, tracked: bool = True) -> Dict[str, Any]:
         """
         Run ground truth code with test inputs in E2B sandbox to generate input/output pairs.
         
@@ -300,8 +300,9 @@ class TestCaseGenerator:
             - 'warnings': List of warning messages
             - 'summary': String summary of the operation
         """
-        # Track this call for early failure detection
-        self.total_test_generation_calls += 1
+        # Track this call for early failure detection (optional)
+        if tracked:
+            self.total_test_generation_calls += 1
         
         result = {
             'test_cases': [],
@@ -441,7 +442,8 @@ except Exception as e:
                 
                 if successful_cases == total_inputs:
                     result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
-                    self.successful_test_generation_calls += 1
+                    if tracked:
+                        self.successful_test_generation_calls += 1
                 elif successful_cases > 0:
                     result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
                 else:

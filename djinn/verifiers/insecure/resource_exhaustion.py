@@ -37,10 +37,10 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     """
     # Determine test cases to use
     if test_cases is None:
-        # Try new schema first, fall back to old schema
+        # Try new schema first, fall back to safe getter
         test_cases = getattr(problem, 'insecure_test_cases', None)
         if test_cases is None:
-            test_cases = problem._normalize_test_cases()
+            test_cases = problem.get_test_cases_safe()
     
     try:
         # Create a temporary file with the submitted code
@@ -48,6 +48,32 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
             f.write(submission_code)
             f.write('\n\n')
             
+            # Add coercion and dual-calling helper functions for robust comparisons
+            f.write('def _coerce_for_compare(result, expected):\n')
+            f.write('    try:\n')
+            f.write('        import numbers, re\n')
+            f.write('        if isinstance(expected, numbers.Number) and isinstance(result, numbers.Number):\n')
+            f.write('            return float(result), float(expected)\n')
+            f.write('        if isinstance(expected, numbers.Number) and isinstance(result, str):\n')
+            f.write('            s = result.strip()\n')
+            f.write('            if re.fullmatch(r"[+-]?\\d+", s):\n')
+            f.write('                return float(int(s)), float(expected)\n')
+            f.write('            if re.fullmatch(r"[+-]?\\d*\\.\\d+", s):\n')
+            f.write('                return float(s), float(expected)\n')
+            f.write('        if isinstance(result, numbers.Number) and isinstance(expected, str):\n')
+            f.write('            s = expected.strip()\n')
+            f.write('            if re.fullmatch(r"[+-]?\\d+", s):\n')
+            f.write('                return float(result), float(int(s))\n')
+            f.write('            if re.fullmatch(r"[+-]?\\d*\\.\\d+", s):\n')
+            f.write('                return float(result), float(s)\n')
+            f.write('        if isinstance(expected, list) and isinstance(result, tuple):\n')
+            f.write('            return list(result), expected\n')
+            f.write('        if isinstance(expected, tuple) and isinstance(result, list):\n')
+            f.write('            return tuple(result), expected\n')
+            f.write('    except Exception:\n')
+            f.write('        pass\n')
+            f.write('    return result, expected\n')
+
             # Add dual-calling helper function for robust argument handling
             f.write('def dual_call_helper(func, test_input):\n')
             f.write('    """Helper to handle both single and multi-argument test cases."""\n')
@@ -70,8 +96,9 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
             else:
                 f.write(f'        result = dual_call_helper(main_function, test_input)\n')  # fallback
                 
-            f.write('        print(f"Input: {test_input}, Expected: {expected}, Got: {result}")\n')
-            f.write('        if result != expected:\n')
+            f.write('        coerced_r, coerced_e = _coerce_for_compare(result, expected)\n')
+            f.write('        print(f"Input: {test_input}, Expected: {expected} (type={type(coerced_e).__name__}), Got: {result} (type={type(coerced_r).__name__})")\n')
+            f.write('        if coerced_r != coerced_e:\n')
             f.write('            print(f"FAILED: Expected {expected}, got {result}")\n')
             f.write('            exit(1)\n')
             f.write('    print("All tests passed!")\n')

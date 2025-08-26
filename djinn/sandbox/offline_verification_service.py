@@ -20,8 +20,10 @@ import resource
 import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import uuid
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
+from djinn.core.problem import Problem
 
 
 def _is_process_running(process) -> bool:
@@ -255,7 +257,10 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                                 child.kill()
                     except Exception:
                         pass
-                    conn.send({"batch_results": [{"error": f"Memory limit exceeded ({memory_limit_mb}MB)"} for _ in req.get("batch_inputs", [None])]})
+                    conn.send({
+                        "request_id": req.get("request_id"),
+                        "batch_results": [{"error": f"Memory limit exceeded ({memory_limit_mb}MB)"} for _ in req.get("batch_inputs", [None])]
+                    })
                     continue
 
                 if child.is_alive():
@@ -266,22 +271,24 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                             child.kill()
                     except Exception:
                         pass
-                    conn.send({"subprocess_error": "Subprocess timed out"})
+                    conn.send({"request_id": req.get("request_id"), "subprocess_error": "Subprocess timed out"})
                     continue
 
                 try:
                     if parent_ch.poll(0):
                         result = parent_ch.recv()
+                        if isinstance(result, dict) and "request_id" not in result:
+                            result["request_id"] = req.get("request_id")
                         conn.send(result)
                     else:
-                        conn.send({"subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"), "subprocess_error": "No result from subprocess"})
                 finally:
                     try:
                         parent_ch.close()
                     except Exception:
                         pass
             except Exception as e:
-                conn.send({"subprocess_error": f"Daemon error: {e}"})
+                conn.send({"request_id": req.get("request_id"), "subprocess_error": f"Daemon error: {e}"})
     finally:
         try:
             conn.close()
@@ -329,7 +336,11 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                                 child.kill()
                     except Exception:
                         pass
-                    conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+                    conn.send({
+                        "request_id": req.get("request_id"),
+                        "status": "crashed",
+                        "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"
+                    })
                     continue
 
                 if child.is_alive():
@@ -340,22 +351,24 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                             child.kill()
                     except Exception:
                         pass
-                    conn.send({"subprocess_error": "Subprocess timed out"})
+                    conn.send({"request_id": req.get("request_id"), "subprocess_error": "Subprocess timed out"})
                     continue
 
                 try:
                     if parent_ch.poll(0):
                         result = parent_ch.recv()
+                        if isinstance(result, dict) and "request_id" not in result:
+                            result["request_id"] = req.get("request_id")
                         conn.send(result)
                     else:
-                        conn.send({"subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"), "subprocess_error": "No result from subprocess"})
                 finally:
                     try:
                         parent_ch.close()
                     except Exception:
                         pass
             except Exception as e:
-                conn.send({"subprocess_error": f"Daemon error: {e}"})
+                conn.send({"request_id": req.get("request_id"), "subprocess_error": f"Daemon error: {e}"})
     finally:
         try:
             conn.close()
@@ -397,6 +410,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(int(config.get("timeout", 6)))
     try:
+        request_id = config.get("request_id")
         submission_code = config["submission_code"]
         function_name = config["function_name"]
         test_input = config.get("test_input")
@@ -408,11 +422,11 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
 
         exec(submission_code, namespace)
         if function_name not in namespace:
-            conn.send({"error": f"Function '{function_name}' not found in submission"})
+            conn.send({"request_id": request_id, "error": f"Function '{function_name}' not found in submission"})
             return
         submitted_function = namespace[function_name]
         if not callable(submitted_function):
-            conn.send({"error": f"'{function_name}' exists but is not callable"})
+            conn.send({"request_id": request_id, "error": f"'{function_name}' exists but is not callable"})
             return
         # Single test or batch mode
         if batch_inputs is not None:
@@ -450,7 +464,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                         signal.alarm(0)
                     except Exception:
                         pass
-            conn.send({"batch_results": results})
+            conn.send({"request_id": request_id, "batch_results": results})
         else:
             try:
                 old_stdout = sys.stdout
@@ -461,6 +475,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                 printed_output = captured_output.getvalue()
                 sys.stdout = old_stdout
                 conn.send({
+                    "request_id": request_id,
                     "output": actual_output,
                     "printed_output": printed_output,
                     "execution_time": execution_time,
@@ -472,12 +487,12 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                 except Exception:
                     pass
     except SyntaxError as e:
-        conn.send({"error": f"Syntax error: {str(e)}"})
+        conn.send({"request_id": config.get("request_id"), "error": f"Syntax error: {str(e)}"})
     except Exception as e:
         error_msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeoutexception" in error_msg.lower():
             error_msg = "Time Limit Exceeded"
-        conn.send({"error": error_msg})
+        conn.send({"request_id": config.get("request_id"), "error": error_msg})
     finally:
         try:
             signal.alarm(0)
@@ -506,6 +521,7 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
     signal.alarm(10)
 
     try:
+        request_id = config.get("request_id")
         submission_code = config["submission_code"]
         exploit_type = config["exploit_type"]
         function_name = config["function_name"]
@@ -519,7 +535,7 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
                 self.test_cases = test_cases
                 self.order_dependent = order_dependent
 
-            def _normalize_test_cases(self):
+            def get_test_cases_safe(self):
                 return self.test_cases or []
 
         dummy_problem = _DummyProblem(function_name, test_cases, order_dependent)
@@ -536,15 +552,15 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
             status_val = status.value if hasattr(status, "value") else str(status)
         except Exception:
             status_val = str(status)
-        conn.send({"status": status_val, "feedback": feedback})
+        conn.send({"request_id": request_id, "status": status_val, "feedback": feedback})
     except MemoryError:
-        conn.send({"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+        conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
     except Exception as e:
         msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeout" in msg.lower():
-            conn.send({"status": "timed_out", "feedback": "Insecure verifier timed out"})
+            conn.send({"request_id": config.get("request_id"), "status": "timed_out", "feedback": "Insecure verifier timed out"})
         else:
-            conn.send({"status": "crashed", "feedback": f"Insecure verifier crashed: {msg}"})
+            conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Insecure verifier crashed: {msg}"})
     finally:
         try:
             signal.alarm(0)
@@ -584,6 +600,12 @@ class OfflineVerificationService:
         self._insecure_external = False
         atexit.register(self._shutdown_secure_daemon)
         atexit.register(self._shutdown_insecure_daemon)
+        # Per-mode locks to serialize external stdio access
+        self._secure_stdio_lock = threading.Lock()
+        self._insecure_stdio_lock = threading.Lock()
+        # Per-mode locks to serialize internal Pipe access
+        self._secure_conn_lock = threading.Lock()
+        self._insecure_conn_lock = threading.Lock()
 
     def _ensure_daemon(self, mode: str):
         """Ensure a daemon is running for the given mode.
@@ -654,38 +676,69 @@ class OfflineVerificationService:
             raise ValueError(f"Unknown daemon mode: {mode}")
 
     def _send_daemon_request(self, mode: str, config: dict, total_timeout_seconds: int) -> dict:
-        """Send request to either external (stdio JSON) or internal (Pipe) daemon."""
+        """Send request to either external (stdio JSON) or internal (Pipe) daemon.
+        Adds a unique request_id and returns only the matching response."""
+        # Attach unique request id
+        request_id = f"{int(time.time()*1000)}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+        config = dict(config)
+        config["request_id"] = request_id
         transport = self._ensure_daemon(mode)
         if transport[0] == "external":
             _, _, sin, sout = transport
+            lock = self._secure_stdio_lock if mode == "secure" else self._insecure_stdio_lock
             try:
-                sin.write(json.dumps(config) + "\n")
-                sin.flush()
+                with lock:
+                    try:
+                        sin.write(json.dumps(config) + "\n")
+                        sin.flush()
+                    except Exception:
+                        return {"subprocess_error": "Daemon unavailable", "request_id": request_id}
+                    deadline = time.time() + total_timeout_seconds
+                    while time.time() < deadline:
+                        line = sout.readline()
+                        if not line:
+                            time.sleep(0.01)
+                            continue
+                        try:
+                            resp = json.loads(line.strip())
+                        except Exception:
+                            # Discard malformed line and continue
+                            continue
+                        if isinstance(resp, dict) and resp.get("request_id") == request_id:
+                            return resp
+                        # Discard responses for other requests
+                    return {"subprocess_error": "Daemon timed out", "request_id": request_id}
             except Exception:
-                return {"subprocess_error": "Daemon unavailable"}
-            deadline = time.time() + total_timeout_seconds
-            while time.time() < deadline:
-                line = sout.readline()
-                if not line:
-                    time.sleep(0.01)
-                    continue
-                try:
-                    return json.loads(line.strip())
-                except Exception as e:
-                    return {"subprocess_error": f"Invalid daemon response: {e}"}
-            return {"subprocess_error": "Daemon timed out"}
+                return {"subprocess_error": "Daemon unavailable", "request_id": request_id}
         else:
             # internal: transport = ("internal", parent_conn)
             parent_conn = transport[1]
+            lock = self._secure_conn_lock if mode == "secure" else self._insecure_conn_lock
             try:
-                parent_conn.send(config)
-                start = time.time()
-                while time.time() - start < total_timeout_seconds:
-                    if parent_conn.poll(0.05):
-                        return parent_conn.recv()
-                return {"subprocess_error": "Daemon timed out"}
+                with lock:
+                    # Drain any stale messages
+                    try:
+                        while parent_conn.poll(0):
+                            try:
+                                parent_conn.recv()
+                            except Exception:
+                                break
+                    except Exception:
+                        pass
+                    parent_conn.send(config)
+                    start = time.time()
+                    while time.time() - start < total_timeout_seconds:
+                        if parent_conn.poll(0.05):
+                            try:
+                                msg = parent_conn.recv()
+                            except Exception:
+                                break
+                            if isinstance(msg, dict) and msg.get("request_id") == request_id:
+                                return msg
+                            # Discard mismatched messages
+                    return {"subprocess_error": "Daemon timed out", "request_id": request_id}
             except (EOFError, BrokenPipeError):
-                return {"subprocess_error": "Daemon unavailable"}
+                return {"subprocess_error": "Daemon unavailable", "request_id": request_id}
 
     def _shutdown_secure_daemon(self) -> None:
         try:
@@ -776,14 +829,9 @@ class OfflineVerificationService:
                 feedback=f"Offline verification failed: {str(e)}"
             )
     
-    def _verify_with_secure_subprocess(self, problem, submission_code: str):
+    def _verify_with_secure_subprocess(self, problem: Problem, submission_code: str):
         """Run secure verification using subprocess isolation."""
-        # Use secure_test_cases if available, otherwise fall back to full test_cases
-        secure_test_cases = getattr(problem, 'secure_test_cases', None)
-        if secure_test_cases is not None:
-            normalized_test_cases = secure_test_cases
-        else:
-            normalized_test_cases = problem._normalize_test_cases()
+        normalized_test_cases = problem._normalize_test_cases()
         order_dependent = getattr(problem, 'order_dependent', True)
         
         failed_tests = []
@@ -844,7 +892,7 @@ class OfflineVerificationService:
             feedback=f"All {len(normalized_test_cases)} tests passed successfully! Total execution time: {total_execution_time:.4f}s"
         )
     
-    def _verify_with_insecure_verifier(self, problem, submission_code: str):
+    def _verify_with_insecure_verifier(self, problem: Problem, submission_code: str):
         """Run insecure verification using the problem's exploit_type to load verifier from @insecure/ directory."""
         try:
             exploit_type = getattr(problem, 'exploit_type', None)
@@ -855,7 +903,7 @@ class OfflineVerificationService:
                 )
 
             # Prepare config for child process
-            normalized_test_cases = problem._normalize_test_cases()
+            normalized_test_cases = problem._normalize_test_cases("insecure")
             cfg = {
                 "submission_code": submission_code,
                 "exploit_type": exploit_type,

@@ -4,6 +4,7 @@ from .registry import registry
 from .exporter import export_problems_to_jsonl, export_to_huggingface, export_filtered_problems_to_jsonl, export_filtered_to_huggingface
 from .scaffolder import scaffold_problem
 from .analysis import print_difficulty_analysis, create_stratified_eval_split
+from ..generation.reference_assets import build_reference_assets
 
 def handle_check(args):
     slug = args.slug
@@ -278,6 +279,7 @@ def load_component_files(args):
         ('ground_truth', 'ground_truth_file'),
         ('exploit', 'exploit_file'),
         ('insecure_verifier', 'insecure_verifier_file'),
+        ('exploit_explanation', 'exploit_explanation_file'),
     ]
     
     for component_name, arg_name in component_files:
@@ -371,7 +373,9 @@ def handle_single_exploit(args, generator):
         result = generator.generate_from_components(
             exploit_description=args.exploit,
             problem_description=components['problem_description'],
-            ground_truth_solution=components.get('ground_truth', '')
+            ground_truth_solution=components.get('ground_truth', ''),
+            provided_exploit=components.get('exploit', ''),
+            provided_insecure_verifier_explanation=components.get('exploit_explanation', '')
         )
         
         if result["success"]:
@@ -404,7 +408,11 @@ def handle_single_exploit(args, generator):
             print("⚠️  Warning: Component files provided but no problem description - will generate from scratch")
             print("   Provided components will override generated ones")
         
-        result = generator.generate_problem(args.exploit)
+        result = generator.generate_problem(
+            args.exploit,
+            provided_exploit=components.get('exploit', ''),
+            provided_insecure_verifier_explanation=components.get('exploit_explanation', '')
+        )
         
         if result["success"]:
             problem_dict = result["problem_dict"]
@@ -432,6 +440,8 @@ def handle_batch_generate_from_file(args, generator):
     Supports both full generation and dataset import modes based on --sample argument.
     """
     
+    components = load_component_files(args)
+
     try:
         # Read exploit descriptions from file
         with open(args.exploit_list_file, 'r') as f:
@@ -468,6 +478,9 @@ def handle_batch_generate_from_file(args, generator):
                             exploit_description=exploit_description,
                             n=sample_size,
                             filter_with_ground_truth=args.filter_ground_truth,
+                            provided_exploit=components.get('exploit', ''),
+                            provided_insecure_verifier_explanation=components.get('exploit_explanation', ''),
+                            provided_insecure_verifier=components.get('insecure_verifier', '')
                         )
                     else:
                         print(f"❌ Unsupported dataset: {args.import_dataset}")
@@ -506,7 +519,7 @@ def handle_batch_generate_from_file(args, generator):
                                 problem_slug = os.path.basename(output_dir)
                                 generator.update_exploit_type_list(problem_slug, result["problem_dict"]["exploit_type"])
                         else:
-                            print(f"❌ Exploit {i}, sample {j} failed: {result.get('error', 'Unknown error')}")
+                            print(f"❌ Exploit {i}, sample {j} failed: {result.get('error', 'Unknown error')}, traceback: {result.get('traceback', '')}, details: {result.get('validation_result', '')}")
                             exploit_results.append({"success": False, "error": result.get('error', 'Unknown error')})
                     
                 else:
@@ -526,11 +539,20 @@ def handle_batch_generate_from_file(args, generator):
                         try:
                             print(f"🚀 Generating problem {j+1}/{sample_size} for: '{exploit_description[:50]}...'")
                             
-                            result = generator.generate_problem(exploit_description)
+                            result = generator.generate_problem(
+                                exploit_description=exploit_description,
+                                provided_exploit=components.get('exploit', ''),
+                                provided_insecure_verifier_explanation=components.get('exploit_explanation', ''),
+                                provided_insecure_verifier=components.get('insecure_verifier', '')
+                            )
                             
                             exploit_attempted += 1
                             if result["success"]:
-                                generator.save_problem(result["problem_dict"], output_dir, result.get("problem"))
+                                generator.save_problem(
+                                    problem_dict=result["problem_dict"],
+                                    output_dir=output_dir,
+                                    problem=result.get("problem")
+                                )
                                 print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
                                 exploit_successful += 1
                                 exploit_results.append({"success": True, "output_dir": output_dir})
@@ -755,6 +777,27 @@ def handle_improve_verifiers(args):
     except Exception as e:
         print(f"Error during verifier improvement: {e}")
 
+
+def handle_generate_references(args):
+    """Collect and persist reference exploits/explanations per exploit type."""
+    try:
+        summary = build_reference_assets(
+            exploit_type=getattr(args, 'exploit_type', None),
+            max_per_type=getattr(args, 'max_per_type', 1),
+        )
+        print("\nReference assets generation summary:")
+        for et, info in summary.items():
+            saved = info.get('saved', 0)
+            paths = info.get('paths', [])
+            msg = info.get('message', '')
+            print(f"- {et}: saved={saved}{(f' ({msg})' if msg else '')}")
+            for p in paths:
+                print(f"    {p}")
+        return True
+    except Exception as e:
+        print(f"Error generating reference assets: {e}")
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Djinn: A framework for creating and verifying coding problems with exploits.")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
@@ -776,7 +819,7 @@ def main():
     parser_generate.add_argument("--exploit", help="Description of the exploit to implement (e.g., 'off-by-one error in loop termination').")
     parser_generate.add_argument("--out", help="Output directory for the generated problem (required for single problem, optional for batch).")
     parser_generate.add_argument("--generator", nargs="?", const="", help="Use optimized generator (specify name or leave empty for interactive menu).")
-    parser_generate.add_argument("--model", default="openrouter/openai/gpt-5", help="OpenRouter model to use for generation.")
+    parser_generate.add_argument("--model", default="openrouter/anthropic/claude-sonnet-4", help="OpenRouter model to use for generation.")
     parser_generate.add_argument("--api-key", help="OpenRouter API key (if not set via OPENROUTER_API_KEY env var).")
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
     parser_generate.add_argument("--eval", action="store_true", help="Run detailed evaluation during generation.")
@@ -787,6 +830,7 @@ def main():
     parser_generate.add_argument("--problem-description-file", help="Path to file containing pre-written problem description (optional).")
     parser_generate.add_argument("--ground-truth-file", help="Path to file containing pre-written ground truth solution (optional).")
     parser_generate.add_argument("--exploit-file", help="Path to file containing pre-written exploit code (optional).")
+    parser_generate.add_argument("--exploit-explanation-file", help="Path to file containing pre-written exploit explanation to guide generation (optional).")
     parser_generate.add_argument("--insecure-verifier-file", help="Path to file containing pre-written insecure verifier code (optional).")
     parser_generate.add_argument("--secure-verifier-file", help="Path to file containing pre-written secure verifier code (optional).")
     # Sample count and dataset import arguments
@@ -815,6 +859,12 @@ def main():
     parser_improve.add_argument("--iters", type=int, default=1, help="Number of improvement iterations (default: 1).")
     parser_improve.add_argument("--save-exploits", action="store_true", help="Persist improved exploit code back to each problem.yaml where applicable.")
     parser_improve.set_defaults(func=handle_improve_verifiers)
+
+    # 'generate-references' command
+    parser_refs = subparsers.add_parser("generate-references", help="Collect and save reference exploits/explanations per exploit type.")
+    parser_refs.add_argument("--exploit-type", help="Specific exploit type to process (default: all types)")
+    parser_refs.add_argument("--max-per-type", type=int, default=1, help="Maximum references to save per exploit type (default: 1)")
+    parser_refs.set_defaults(func=handle_generate_references)
 
     args = parser.parse_args()
     args.func(args)

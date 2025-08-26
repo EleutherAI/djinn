@@ -59,7 +59,7 @@ class Problem:
     exploit_finding_appearance: Optional[float] = None
     order_dependent: bool = True
 
-    def _normalize_test_cases(self) -> List[Tuple]:
+    def _normalize_test_cases(self, mode: str = "secure") -> List[Tuple]:
         """
         Normalize test_cases to ensure they're a proper list of tuples.
         Handles cases where test_cases might be:
@@ -67,20 +67,25 @@ class Problem:
         - String representation of tuples "[(1, 2), (3, 4)]"  
         - Already proper list of tuples
         """
-        if not self.test_cases:
+        if mode == "secure":
+            test_cases = self.test_cases
+        else:
+            test_cases = self.insecure_test_cases
+
+        if not test_cases:
             return []
         
         # If it's a string, parse it
-        if isinstance(self.test_cases, str):
+        if isinstance(test_cases, str):
             try:
                 import ast
-                return ast.literal_eval(self.test_cases)
+                return ast.literal_eval(test_cases)
             except (ValueError, SyntaxError):
                 return []
         
         # If it's already a list, return as is
-        if isinstance(self.test_cases, list):
-            return self.test_cases
+        if isinstance(test_cases, list):
+            return test_cases
             
         return []
 

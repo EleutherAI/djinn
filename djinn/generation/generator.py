@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import dspy
 from datasets import load_dataset
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from .modules import ThreeStageGenerationPipeline
 from .improvement import VerifierImprovementPipeline
 from .generator_utils import TestCaseGenerator
@@ -20,14 +20,16 @@ from pathlib import Path
 
 DATASET_MAPPING = {
     "primeintellect": {
-        "name": "primeintellect/problems",
-        "prompt_col": "problem_statement",
-        "solution_col": "gold_standard_solution"
+        "name": "PrimeIntellect/verifiable-coding-problems",
+        "prompt_col": "prompt",
+        "solution_col": "gold_standard_solution",
+        "test_cases_col": "verification_info"
     },
     "taco-verified": {
         "name": "likaixin/TACO-verified",
         "prompt_col": "question",
-        "solution_col": "solutions"
+        "solution_col": "solutions",
+        "test_cases_col": "input_output"
     },
 }
 
@@ -310,26 +312,36 @@ class ProblemGenerator:
             from djinn.sandbox.verification_service import get_verification_service
             from djinn.core.sandbox_defs import VerificationStatus
             
-            class _TempProblem:
-                def __init__(self):
-                    self.description = "generated"
-                    self.function_name = function_name
-                    self.test_cases = test_cases
-                    self.ground_truth = ground_truth
-                    self.exploit = exploit
-                    self.insecure_test_cases = insecure_test_cases
-                    self.exploit_expected_status = "passed"
-                    self.order_dependent = True
-                    self.exploit_type = exploit_type_key
-                def _normalize_test_cases(self):
-                    return self.test_cases or []
+            from ..core.problem import Problem
+            temp_problem_dict = {
+                "id": "temp_difficulty_check",
+                "description": "generated",
+                "function_name": function_name,
+                "test_cases": test_cases,
+                "ground_truth": ground_truth,
+                "exploit": "# temp",
+                "insecure_test_cases": insecure_test_cases,
+                "insecure_verifier_info": "temp",
+                "exploit_explanation": "temp",
+                "exploit_expected_status": "passed",
+                "keywords": [],
+                "info_leak_method": "",
+                "exploit_type": exploit_type_key
+            }
+            temp_problem = Problem(**temp_problem_dict)
 
             svc = get_verification_service()
-            temp_problem = _TempProblem()
+
+            print(f"🔍 Running final validation and alignment check for problem: {temp_problem.description}")
+            print(f"🔍 Ground truth: {ground_truth}")
+            print(f"🔍 Exploit: {exploit}")
+            print(f"🔍 Function name: {function_name}")
+            print(f"🔍 Test cases: {temp_problem._normalize_test_cases()}")
+            print(f"🔍 Insecure test cases: {temp_problem._normalize_test_cases('insecure')}")
 
             # Ground truth should pass on both
-            _, gt_secure = (None, svc.verify_single(temp_problem, ground_truth, secure=True))
-            _, gt_insecure = (None, svc.verify_single(temp_problem, ground_truth, secure=False))
+            gt_secure = svc.verify_single(temp_problem, ground_truth, secure=True)
+            gt_insecure = svc.verify_single(temp_problem, ground_truth, secure=False)
             if gt_secure.status != VerificationStatus.PASSED or gt_insecure.status != VerificationStatus.PASSED:
                 return {
                     "success": False,
@@ -412,7 +424,10 @@ class ProblemGenerator:
             "alignment_result": alignment_result
         }
     
-    def generate_problem(self, exploit_description: str) -> Dict[str, Any]:
+    def generate_problem(self, exploit_description: str, 
+                         provided_exploit: str = "", 
+                         provided_insecure_verifier_explanation: str = "",
+                         provided_insecure_verifier: str = "") -> Dict[str, Any]:
         """
         Generate a complete problem from an exploit description.
         
@@ -429,7 +444,10 @@ class ProblemGenerator:
         # Run the three-stage generation pipeline
         with dspy.context(lm=self.lm):
             result = self.pipeline.generate_complete_problem(
-                exploit_description=final_exploit_description
+                exploit_description=final_exploit_description,
+                reference_exploit=provided_exploit,
+                reference_exploit_explanation=provided_insecure_verifier_explanation,
+                reference_insecure_verifier=provided_insecure_verifier
             )
         
         # Check if generation failed at stage 2 or prefilter
@@ -534,7 +552,9 @@ class ProblemGenerator:
             }
     
     def generate_from_components(self, exploit_description: str, problem_description: str = "", 
-                                ground_truth_solution: str = "", test_cases: str = "") -> Dict[str, Any]:
+                                ground_truth_solution: str = "", test_cases: str = "",
+                                provided_exploit: str = "", provided_insecure_verifier_explanation: str = "",
+                                provided_insecure_verifier: str = "") -> Dict[str, Any]:
         """
         Generate verifiers and exploits from existing problem components.
         
@@ -557,7 +577,10 @@ class ProblemGenerator:
                 exploit_description=final_exploit_description,
                 reference_description=problem_description,
                 reference_ground_truth=ground_truth_solution,
-                reference_test_cases=test_cases
+                reference_test_cases=test_cases,
+                reference_exploit=provided_exploit,
+                reference_exploit_explanation=provided_insecure_verifier_explanation,
+                reference_insecure_verifier=provided_insecure_verifier
             )
         
         # Check if generation failed at stage 2 or prefilter
@@ -911,7 +934,9 @@ Respond with just the directory name, nothing else."""
         raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
     def import_from_taco_verified(self, row: Dict[str, Any] = None, 
-                                  exploit_description: str = "") -> Dict[str, Any]:
+                                  exploit_description: str = "", provided_exploit: str = "", 
+                                  provided_insecure_verifier_explanation: str = "",
+                                  provided_insecure_verifier: str = "") -> Dict[str, Any]:
         """
         Import a problem from the likaixin/TACO-verified dataset and generate missing components.
         
@@ -953,6 +978,9 @@ Respond with just the directory name, nothing else."""
                 exploit_description=exploit_description,
                 problem_description=problem_description,
                 ground_truth_solution=reference_ground_truth,
+                provided_exploit=provided_exploit,
+                provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
+                provided_insecure_verifier=provided_insecure_verifier
             )
             
             end_time = time.time()
@@ -972,8 +1000,9 @@ Respond with just the directory name, nothing else."""
 
     def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
                                   exploit_description: str = "", 
-                                  provided_exploit: str = "", provided_insecure_verifier: str = "",
-                                  provided_secure_verifier: str = "") -> Dict[str, Any]:
+                                  provided_exploit: str = "", 
+                                  provided_insecure_verifier_explanation: str = "",
+                                  provided_insecure_verifier: str = "") -> Dict[str, Any]:
         """
         Import a problem from the PrimeIntellect dataset and generate missing components.
         
@@ -1021,7 +1050,10 @@ Respond with just the directory name, nothing else."""
                 exploit_description=exploit_description,
                 problem_description=problem_description,
                 ground_truth_solution=ground_truth_solution,
-                test_cases=test_cases
+                test_cases=test_cases,
+                provided_exploit=provided_exploit,
+                provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
+                provided_insecure_verifier=provided_insecure_verifier
             )
             
             end_time = time.time()
@@ -1039,8 +1071,12 @@ Respond with just the directory name, nothing else."""
                 "traceback": traceback.format_exc()
             }
 
-    def sample_and_import(self, exploit_description: str, n: int = 5, filter_with_ground_truth: bool = True, 
-                         max_workers: int = 5) -> List[Dict[str, Any]]:
+    def sample_and_import(self, exploit_description: str, n: int = 5, 
+        filter_with_ground_truth: bool = True,
+        max_workers: int = 5, 
+        provided_exploit: str = "", 
+        provided_insecure_verifier_explanation: str = "", 
+        provided_insecure_verifier: str = "") -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the configured dataset in parallel.
         
@@ -1062,10 +1098,11 @@ Respond with just the directory name, nothing else."""
         filter_fn = None
         import_function = None
         solution_col = self.dataset_config["solution_col"]
+        test_cases_col = self.dataset_config["test_cases_col"]
 
         if self.dataset_name == "primeintellect":
             if filter_with_ground_truth:
-                filter_fn = lambda x: x[solution_col]
+                filter_fn = lambda x: bool(x[solution_col]) and 'python' in x[test_cases_col]
             import_function = self.import_from_prime_intellect
         elif self.dataset_name == "taco-verified":
             # For TACO, GT is always present in 'solutions', so we filter for non-empty lists.
@@ -1082,28 +1119,54 @@ Respond with just the directory name, nothing else."""
         print(f"📋 Found {len(samples)} problems to import")
         
         results = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Timeout controls (env-configurable)
+        per_batch_timeout = int(os.getenv("DJINN_IMPORT_FUTURE_TIMEOUT", "1800"))  # seconds
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        timed_out = False
+        try:
             future_to_problem = {
-                executor.submit(import_function, row=problem, exploit_description=exploit_description): problem
+                executor.submit(
+                    import_function,
+                    row=problem,
+                    exploit_description=exploit_description,
+                    provided_exploit=provided_exploit,
+                    provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
+                    provided_insecure_verifier=provided_insecure_verifier
+                ): problem
                 for problem in samples
             }
-            
+
             print(f"🚀 Started {len(samples)} import jobs in parallel...")
-            
-            for future in as_completed(future_to_problem):
-                problem = future_to_problem[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    import traceback
-                    print(f"Error importing problem: {e}")
-                    results.append({
-                        "success": False,
-                        "error": str(e),
-                        "problem_info": problem,
-                        "traceback": traceback.format_exc()
-                    })
+
+            try:
+                for future in as_completed(list(future_to_problem.keys()), timeout=per_batch_timeout):
+                    problem = future_to_problem[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        import traceback
+                        print(f"Error importing problem: {e}")
+                        results.append({
+                            "success": False,
+                            "error": str(e),
+                            "problem_info": problem,
+                            "traceback": traceback.format_exc()
+                        })
+            except TimeoutError:
+                timed_out = True
+                print(f"⏳ Import jobs exceeded timeout ({per_batch_timeout}s). Cancelling remaining jobs...")
+                for f, problem in future_to_problem.items():
+                    if not f.done():
+                        f.cancel()
+                        results.append({
+                            "success": False,
+                            "error": f"Import job timed out after {per_batch_timeout}s",
+                            "problem_info": problem,
+                        })
+        finally:
+            # If we timed out, do not wait for lingering tasks
+            executor.shutdown(wait=not timed_out, cancel_futures=True)
         
         # Summary
         successful = sum(1 for r in results if r and r.get("success"))

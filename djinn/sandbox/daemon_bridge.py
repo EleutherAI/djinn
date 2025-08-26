@@ -84,9 +84,9 @@ def _run_loop(mode: str, mem_mb: int) -> None:
             except Exception:
                 pass
             payload = (
-                {"batch_results": [{"error": f"Memory limit exceeded ({mem_mb}MB)"} for _ in req.get("batch_inputs", [None])]}
+                {"request_id": req.get("request_id"), "batch_results": [{"error": f"Memory limit exceeded ({mem_mb}MB)"} for _ in req.get("batch_inputs", [None])]}
                 if mode == "secure"
-                else {"status": "crashed", "feedback": f"Memory limit exceeded ({mem_mb}MB)"}
+                else {"request_id": req.get("request_id"), "status": "crashed", "feedback": f"Memory limit exceeded ({mem_mb}MB)"}
             )
             stdout.write(json.dumps(payload) + "\n")
             stdout.flush()
@@ -102,7 +102,7 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 pass
         
         if proc.is_alive():
-            stdout.write(json.dumps({"subprocess_error": "Subprocess timed out"}) + "\n")
+            stdout.write(json.dumps({"request_id": req.get("request_id"), "subprocess_error": "Subprocess timed out"}) + "\n")
             stdout.flush()
             continue
 
@@ -110,6 +110,9 @@ def _run_loop(mode: str, mem_mb: int) -> None:
             resp = parent_ch.recv() if parent_ch.poll(0) else {"subprocess_error": "No result from subprocess"}
         except Exception as e:
             resp = {"subprocess_error": f"Failed to read result: {e}"}
+        # Ensure request_id is always present on outgoing responses
+        if isinstance(resp, dict) and "request_id" not in resp:
+            resp["request_id"] = req.get("request_id")
         stdout.write(json.dumps(resp) + "\n")
         stdout.flush()
 
