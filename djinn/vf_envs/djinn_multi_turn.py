@@ -147,7 +147,7 @@ def training_example():
     print("\nSetting up GRPO training...")
     
     model_name = "willcb/Qwen3-8B"
-    run_name = "djinn-multi-turn-agent-lora-2"
+    run_name = "djinn-multi-turn-agent-lora-4"
     
     # Get model and tokenizer
     model, tokenizer = vf.get_model_and_tokenizer(model_name)
@@ -182,6 +182,8 @@ def training_example():
     args.logging_steps = 10
     args.log_completions = True
     args.ignore_data_skip = True
+    args.num_train_epochs = 20
+    args.max_steps = 5000
 
     # Create GRPO trainer with LoRA
     trainer = vf.GRPOTrainer(

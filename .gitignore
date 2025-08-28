@@ -97,3 +97,5 @@ qwen3_chat_formatter.py
 
 .reward_cache/
 imported_problems/*
+completions/*
+generated_completions/*
