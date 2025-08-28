@@ -211,7 +211,7 @@ def create_stratified_eval_split(eval_fraction: float = 0.25) -> Tuple[Set[str],
     return eval_problems, train_problems
 
 
-def create_random_eval_split(eval_fraction: float = 0.25, seed: int | None = 42) -> Tuple[Set[str], Set[str]]:
+def create_random_eval_split(eval_fraction: float = 0.15, seed: int | None = 42) -> Tuple[Set[str], Set[str]]:
     """
     Create a random evaluation split, ignoring exploit types and difficulties.
     
