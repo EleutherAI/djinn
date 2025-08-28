@@ -1,6 +1,6 @@
 import json
 from .registry import registry
-from .analysis import create_stratified_eval_split
+from .analysis import create_stratified_eval_split, create_random_eval_split
 from datasets import Dataset, DatasetDict
 
 def export_problems_to_jsonl(file_path: str, create_splits: bool = True):
@@ -133,18 +133,33 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         train_dataset = Dataset.from_dict(train_data)
         eval_dataset = Dataset.from_dict(eval_data)
         
-        # Create DatasetDict with splits
+        # Also create alternate random split
+        alt_eval_ids, alt_train_ids = create_random_eval_split()
+        alt_train_data = {k: [] for k in train_data.keys()}
+        alt_eval_data = {k: [] for k in eval_data.keys()}
+        for problem in registry:
+            target = alt_eval_data if problem.id in alt_eval_ids else alt_train_data
+            for key in target.keys():
+                target[key].append(getattr(problem, key))
+        alt_train_dataset = Dataset.from_dict(alt_train_data)
+        alt_eval_dataset = Dataset.from_dict(alt_eval_data)
+
+        # Create DatasetDict with both stratified and alternate random splits
         dataset_dict = DatasetDict({
             "train": train_dataset,
-            "eval": eval_dataset
+            "eval": eval_dataset,
+            "train_alternate": alt_train_dataset,
+            "test_alternate": alt_eval_dataset,
         })
         
-        print(f"Uploading stratified dataset to Hugging Face Hub repository: {repo_id}")
-        print(f"  Training set: {len(train_dataset)} problems")
-        print(f"  Evaluation set: {len(eval_dataset)} problems")
+        print(f"Uploading dataset with stratified and alternate splits to Hugging Face Hub repository: {repo_id}")
+        print(f"  Training set (stratified): {len(train_dataset)} problems")
+        print(f"  Evaluation set (stratified): {len(eval_dataset)} problems")
+        print(f"  Training set (alternate random): {len(alt_train_dataset)} problems")
+        print(f"  Test set (alternate random): {len(alt_eval_dataset)} problems")
         
         dataset_dict.push_to_hub(repo_id, private=private)
-        print("✅ Successfully uploaded stratified dataset to the Hub.")
+        print("✅ Successfully uploaded dataset with both stratified and alternate splits to the Hub.")
     
     else:
         # Original single-dataset export

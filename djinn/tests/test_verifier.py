@@ -4,12 +4,12 @@ Test script for both online (E2B) and offline verification services using proble
 
 This script:
 1. Discovers all problems in djinn/problems
-2. Tests both online and offline verifiers against ground truth, exploit, and nulls
+2. Tests consistency (ground truth + exploit), cross-exploit nulls, and security separately
 3. Compares results between online and offline services when both are available
 4. Reports detailed results and any inconsistencies
 
 Usage:
-    python test_verifier.py [--problem PROBLEM_ID] [--verbose] [--offline-only] [--online-only] [--compare]
+    python test_verifier.py [--problem PROBLEM_ID] [--verbose] [--security-only] [--cross-nulls-only] [--compare]
 """
 
 import argparse
@@ -52,6 +52,40 @@ def create_test_problem() -> Problem:
         order_dependent=True
     )
 
+def test_cross_exploit_nulls_separately(problem: Problem, verbose: bool = False) -> Dict[str, Any]:
+    """Test cross-exploit nulls separately from consistency tests."""
+    print(f"\n🚫 Testing Cross-Exploit Nulls for {problem.id}")
+    
+    try:
+        # Cross-exploit null tests (should not pass either verifier)
+        cross_results = test_cross_exploit_nulls(problem)
+        
+        if verbose:
+            for k, v in cross_results['tests'].items():
+                if v['secure_status'] == VerificationStatus.PASSED.value or v['insecure_status'] == VerificationStatus.PASSED.value:
+                    print(f"   {k}: secure={v['secure_status']}, insecure={v['insecure_status']}")
+        
+        # Always print a concise cross-null verdict with emoji
+        verdict_icon = "✅" if cross_results.get("overall_success", False) else "❌"
+        print(f"{verdict_icon} Cross-Exploit Nulls: {'PASSED' if cross_results.get('overall_success', False) else 'FAILED'}")
+        
+        return {
+            "problem_id": problem.id,
+            "status": "PASSED" if cross_results.get("overall_success", False) else "FAILED",
+            "cross_exploit_nulls": cross_results,
+            "error": None,
+        }
+    except Exception as e:
+        print(f"❌  Cross-Null Test ERROR: {str(e)}")
+        if verbose:
+            print(f"Traceback: {traceback.format_exc()}")
+        return {
+            "problem_id": problem.id,
+            "status": "ERROR",
+            "error": str(e)
+        }
+
+
 def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, Any]:
     """Test a single problem and return detailed results."""
     print(f"\n{'='*60}")
@@ -62,7 +96,6 @@ def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, An
         print(f"Description: {problem.description[:100]}{'...' if len(problem.description) > 100 else ''}")
         print(f"Function: {problem.function_name}")
         print(f"Test cases: {len(problem.test_cases) if problem.test_cases else 0}")
-        print(f"Nulls (cross-exploit): using representative exploits by type")
     
     try:
         # Ground truth must pass on both verifiers
@@ -80,15 +113,7 @@ def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, An
             ex_insecure.status.value == expected_insecure_status
         )
 
-        # Cross-exploit null tests (should not pass either verifier)
-        cross_results = test_cross_exploit_nulls(problem)
-
-        if verbose:
-            for k, v in cross_results['tests'].items():
-                if v['secure_status'] == VerificationStatus.PASSED.value or v['insecure_status'] == VerificationStatus.PASSED.value:
-                    print(f"   {k}: secure={v['secure_status']}, insecure={v['insecure_status']}")
-
-        overall_ok = gt_ok and exploit_ok and cross_results.get("overall_success", False)
+        overall_ok = gt_ok and exploit_ok
 
         # Always print a concise consistency verdict with emoji
         verdict_icon = "✅" if overall_ok else "❌"
@@ -97,7 +122,6 @@ def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, An
         if verbose:
             gt_icon = "✅" if gt_ok else "❌"
             ex_icon = "✅" if exploit_ok else "❌"
-            ce_icon = "✅" if cross_results.get("overall_success", False) else "❌"
             print(f"   {gt_icon} Ground Truth: secure={gt_secure.status.value}, insecure={gt_insecure.status.value}")
             print(f"   {ex_icon} Exploit: secure={ex_secure.status.value}, insecure={ex_insecure.status.value} (expected insecure: {expected_insecure_status})")
 
@@ -112,7 +136,6 @@ def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, An
                 "exploit_insecure": ex_insecure.status.value,
                 "expected_insecure": expected_insecure_status,
             },
-            "cross_exploit_nulls": cross_results,
             "error": None,
         }
     except Exception as e:
@@ -205,11 +228,9 @@ def run_tests():
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--security-only", "-s", action="store_true", 
                        help="Only test security (that exploits are blocked)")
+    parser.add_argument("--cross-nulls-only", "-c", action="store_true",
+                       help="Only test cross-exploit nulls (that exploits from other problems don't pass)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available problems")
-    parser.add_argument("--offline-only", action="store_true", help="Test only offline verification service")
-    parser.add_argument("--online-only", action="store_true", help="Test only online verification service (requires E2B_API_KEY)")
-    parser.add_argument("--compare", action="store_true", help="Compare online vs offline services (requires E2B_API_KEY)")
-    parser.add_argument("--test-offline-service", action="store_true", help="Test offline verification service directly")
     
     args = parser.parse_args()
     
@@ -221,24 +242,6 @@ def run_tests():
             print(f"  {problem_id} - {problem.description[:50]}{'...' if len(problem.description) > 50 else ''}")
         return
     
-    # Configure verification service based on arguments
-    if args.offline_only:
-        force_offline_verification()
-        print("🔧 Forced offline verification mode")
-    elif args.online_only:
-        if not os.getenv("E2B_API_KEY"):
-            print("❌ Error: --online-only requires E2B_API_KEY environment variable")
-            sys.exit(1)
-        force_online_verification()
-        print("🌐 Forced online verification mode")
-    elif args.compare:
-        if not os.getenv("E2B_API_KEY"):
-            print("❌ Error: --compare requires E2B_API_KEY environment variable")
-            sys.exit(1)
-        # Will use default service selection and override in comparison function
-    else:
-        # Use default service selection (auto-detect)
-        print("🔄 Using auto-detection for verification service")
     
     # Determine which problems to test
     if args.problem:
@@ -250,38 +253,40 @@ def run_tests():
     else:
         # Only test first 5 problems
         all_problems = list(registry)
-        problems_to_test = all_problems[:5]
+        random.shuffle(all_problems)
+        problems_to_test = all_problems[:20]
     
     print(f"Testing {len(problems_to_test)} problem(s)")
     print(f"Verbose mode: {'ON' if args.verbose else 'OFF'}")
     
     # Test all problems
     results = []
+    cross_null_results = []
     security_results = []
     comparison_results = []
     
     for problem in problems_to_test:
-        if not args.security_only:
-            # Full consistency test
+        if not args.security_only and not args.cross_nulls_only:
+            # Consistency test (ground truth + exploit)
             result = test_single_problem(problem, args.verbose)
             results.append(result)
+        
+        if not args.security_only:
+            # Cross-exploit null test (separate from consistency)
+            cross_null_result = test_cross_exploit_nulls_separately(problem, args.verbose)
+            cross_null_results.append(cross_null_result)
         
         # Security test
         security_result = test_verifier_security(problem, args.verbose)
         security_result["problem_id"] = problem.id
         security_results.append(security_result)
-        
-        # Comparison test if requested
-        if args.compare:
-            comparison_result = test_service_comparison(problem, args.verbose)
-            comparison_results.append(comparison_result)
     
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
     
-    if not args.security_only:
+    if not args.security_only and not args.cross_nulls_only:
         print("\n📋 Consistency Tests:")
         passed = sum(1 for r in results if r["status"] == "PASSED")
         failed = sum(1 for r in results if r["status"] == "FAILED")
@@ -294,6 +299,24 @@ def run_tests():
         if failed > 0 or errors > 0:
             print("\nFailed/Error Problems:")
             for r in results:
+                if r["status"] != "PASSED":
+                    print(f"  - {r['problem_id']}: {r['status']}")
+                    if r.get("error"):
+                        print(f"    Error: {r['error']}")
+    
+    if not args.security_only:
+        print("\n🚫 Cross-Exploit Null Tests:")
+        cn_passed = sum(1 for r in cross_null_results if r["status"] == "PASSED")
+        cn_failed = sum(1 for r in cross_null_results if r["status"] == "FAILED")
+        cn_errors = sum(1 for r in cross_null_results if r["status"] == "ERROR")
+        
+        print(f"  ✅ PASSED: {cn_passed}")
+        print(f"  ❌ FAILED: {cn_failed}")
+        print(f"  💥 ERRORS: {cn_errors}")
+        
+        if cn_failed > 0 or cn_errors > 0:
+            print("\nCross-Null Test Issues:")
+            for r in cross_null_results:
                 if r["status"] != "PASSED":
                     print(f"  - {r['problem_id']}: {r['status']}")
                     if r.get("error"):
@@ -322,42 +345,13 @@ def run_tests():
                         print("    Exploit NOT blocked by secure verifier")
     
     # Comparison summary if applicable
-    if args.compare and comparison_results:
-        print("\n⚖️  Service Comparison:")
-        comp_passed = sum(1 for r in comparison_results if r.get("overall_success", False))
-        comp_failed = sum(1 for r in comparison_results if not r.get("overall_success", False) and not r.get("skipped", False))
-        comp_skipped = sum(1 for r in comparison_results if r.get("skipped", False))
-        comp_errors = sum(1 for r in comparison_results if r.get("error"))
-        
-        print(f"  ✅ MATCHING: {comp_passed}")
-        print(f"  ❌ MISMATCHED: {comp_failed}")
-        print(f"  ⏭️  SKIPPED: {comp_skipped}")
-        print(f"  💥 ERRORS: {comp_errors}")
-        
-        # Calculate average speedup
-        valid_results = [r for r in comparison_results if r.get("timing", {}).get("summary")]
-        if valid_results:
-            avg_speedups = [r["timing"]["summary"]["avg_speedup"] for r in valid_results if r["timing"]["summary"]["avg_speedup"]]
-            if avg_speedups:
-                overall_speedup = sum(avg_speedups) / len(avg_speedups)
-                print(f"  📊 Average Speedup (offline vs online): {overall_speedup:.2f}x")
-        
-        if comp_failed > 0:
-            print("\nComparison Mismatches:")
-            for r in comparison_results:
-                if not r.get("overall_success", False) and r.get("mismatches"):
-                    print(f"  - {r['problem_id']}: {len(r['mismatches'])} mismatches")
-                    for mismatch in r["mismatches"][:3]:  # Show first 3
-                        print(f"    {mismatch['test']}: offline={mismatch['offline']}, online={mismatch['online']}")
-    
     # Exit with appropriate code
     overall_success = True
-    if not args.security_only:
+    if not args.security_only and not args.cross_nulls_only:
         overall_success = overall_success and (failed == 0 and errors == 0)
+    if not args.security_only:
+        overall_success = overall_success and (cn_failed == 0 and cn_errors == 0)
     overall_success = overall_success and (sec_failed == 0 and sec_errors == 0)
-    if args.compare:
-        overall_success = overall_success and (comp_failed == 0 and comp_errors == 0)
-    
     if overall_success:
         print(f"\n🎉 ALL TESTS PASSED! Verification services are working correctly.")
         sys.exit(0)
