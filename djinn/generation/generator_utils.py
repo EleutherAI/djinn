@@ -477,7 +477,7 @@ except Exception as e:
         return None 
 
     def _validate_problem_consistency(self, ground_truth: str, exploit: str, function_name: str, 
-                                    test_cases: str, insecure_test_cases: str) -> str:
+                                    test_cases: str, insecure_test_cases: str, exploit_key: str) -> str:
         """
         Validate problem consistency and return results as JSON string.
         
@@ -487,6 +487,7 @@ except Exception as e:
             function_name: Name of the function to test
             test_cases: Test cases as string representation of list of tuples
             insecure_test_cases: Insecure test cases as string representation of list of tuples
+            exploit_key: Key of the exploit to validate
             
         Returns:
             JSON string containing validation results
@@ -514,6 +515,7 @@ except Exception as e:
                 function_name=function_name,
                 test_cases=parsed_test_cases,
                 insecure_test_cases=insecure_test_cases,
+                exploit_key=exploit_key
             )
             
             # Create summary for the LLM

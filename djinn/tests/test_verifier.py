@@ -221,16 +221,6 @@ def run_tests():
             print(f"  {problem_id} - {problem.description[:50]}{'...' if len(problem.description) > 50 else ''}")
         return
     
-    # Test offline service directly if requested
-    if args.test_offline_service:
-        offline_test_result = test_offline_service_directly(args.verbose)
-        if offline_test_result["overall_success"]:
-            print("\n🎉 Offline service test PASSED!")
-            sys.exit(0)
-        else:
-            print("\n💥 Offline service test FAILED!")
-            sys.exit(1)
-    
     # Configure verification service based on arguments
     if args.offline_only:
         force_offline_verification()

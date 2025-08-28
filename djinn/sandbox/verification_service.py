@@ -17,7 +17,7 @@ from e2b.exceptions import TimeoutException
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
 
 
-# Thread-local service instances
+# Thread-local service instances only (default safe behavior for multithreaded callers)
 _tls = threading.local()
 
 def get_verification_service():

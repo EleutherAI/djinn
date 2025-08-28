@@ -18,6 +18,7 @@ from .signatures import (
     GenerateGroundTruthAndTests,
     GenerateVulnerabilityComponents,
 )
+import numpy as np
 
 
 # === THREE-STAGE GENERATION PIPELINE ===
@@ -38,11 +39,18 @@ class ThreeStageGenerationPipeline(dspy.Module):
         
         # Dedicated LM for stages 1 and 2
         self.deepseek_lm = dspy.LM(
-            model="openrouter/deepseek/deepseek-chat-v3.1",
+            model="openrouter/x-ai/grok-code-fast-1",
             api_key=self.api_key,
             api_base="https://openrouter.ai/api/v1",
             max_tokens=32768
         )
+
+        # LOL
+        # self.deepseek_lm = dspy.LM(
+        #     model="gpt-5-2025-08-07",
+        #     max_tokens=32768,
+        #     temperature=1
+        # )
         
         # Stage 1: Problem Description Generation (ChainOfThought - no tools needed)
         self.description_generator = dspy.ChainOfThought(GenerateProblemDescription)
@@ -51,14 +59,14 @@ class ThreeStageGenerationPipeline(dspy.Module):
         self.ground_truth_generator = dspy.ReAct(
             GenerateGroundTruthAndTests, 
             tools=self.test_generator.stage2_tools, 
-            max_iters=10
+            max_iters=4
         )
         
         # Stage 3: Vulnerability Component Generation (ReAct with validation tools)
         self.vulnerability_generator = dspy.ReAct(
             GenerateVulnerabilityComponents, 
             tools=self.test_generator.stage3_tools, 
-            max_iters=10
+            max_iters=4
         )
         
         # Create logs directory
@@ -124,7 +132,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
         return result
     
     def generate_stage2(self, description: str, function_name: str, 
-                       reference_ground_truth: str = "", reference_test_cases: str = "") -> dspy.Prediction:
+                       reference_ground_truth: str = "", reference_test_cases: str = "", exploit_key: str = "") -> dspy.Prediction:
         """
         Stage 2: Generate ground truth solution and test cases.
         
@@ -172,12 +180,11 @@ class ThreeStageGenerationPipeline(dspy.Module):
                 if final_test_cases:
                     cleaned_result.test_cases = repr(final_test_cases)
         except Exception:
-                print(f"❌ Stage 2 failed: No successful test case generation ({stats['total_calls']} attempts)")
+                print(f"❌ Stage 2 failed: No successful test case generation ( attempts)")
                 # Return a failure prediction with special marker
                 failure_result = dspy.Prediction(
                     stage2_failed=True,
                     failure_reason="No successful test case generation",
-                    test_generation_stats=stats,
                     description=description,
                     function_name=function_name
                 )
@@ -185,8 +192,8 @@ class ThreeStageGenerationPipeline(dspy.Module):
 
         # Check if any successful test case generation occurred
         stats = self.test_generator.get_test_generation_stats()
-        if stats["total_calls"] > 0 and not cleaned_result.test_cases:
-            print(f"❌ Stage 2 failed: No successful test case generation ({stats['total_calls']} attempts)")
+        if stats["total_calls"] > 0 and not hasattr(cleaned_result, 'test_cases') or not cleaned_result.test_cases:
+            print(f"❌ Stage 2 failed: No successful test case generation ({stats['total_calls']} attempts), proposed_inputs={cleaned_result.proposed_inputs}")
             # Return a failure prediction with special marker
             failure_result = dspy.Prediction(
                 stage2_failed=True,
@@ -195,49 +202,19 @@ class ThreeStageGenerationPipeline(dspy.Module):
                 function_name=function_name
             )
             return failure_result
-        
-        print("✅ Generated ground truth and test cases")
+
+        print(f"✅ Generated ground truth and {len(ast.literal_eval(cleaned_result.test_cases))} test cases")
         if stats["total_calls"] > 0:
             print(f"📊 Test generation stats: {stats['successful_calls']}/{stats['total_calls']} successful calls")
-        # Programmatically construct insecure_test_cases from proposed_insecure_inputs; fallback to a slice
-        try:
-            insecure_inputs = None
-            if hasattr(cleaned_result, 'proposed_insecure_inputs') and cleaned_result.proposed_insecure_inputs:
-                try:
-                    insecure_inputs = ast.literal_eval(cleaned_result.proposed_insecure_inputs)
-                    if not isinstance(insecure_inputs, list):
-                        insecure_inputs = None
-                except Exception:
-                    insecure_inputs = None
 
-            insecure_cases_repr = None
-            if insecure_inputs:
-                try:
-                    tc_insec = self.test_generator.generate_test_cases(
-                        ground_truth_code=cleaned_result.ground_truth,
-                        test_inputs=insecure_inputs,
-                        function_name=function_name,
-                        tracked=False
-                    )
-                    if tc_insec.get('success') and tc_insec.get('test_cases'):
-                        insecure_cases_repr = repr(tc_insec['test_cases'])
-                except Exception:
-                    insecure_cases_repr = None
+        if exploit_key in ["test_case_leak", "filesystem_exposure", "hardcoding_or_memorization", "inspect_module_abuse"]:
+            parsed_cases = ast.literal_eval(cleaned_result.test_cases)
+            if isinstance(parsed_cases, list):
+                k = min(5, len(parsed_cases) // 2)
+                cleaned_result.insecure_test_cases = repr(parsed_cases[:k])
+        else:
+            cleaned_result.insecure_test_cases = cleaned_result.test_cases
 
-            if insecure_cases_repr:
-                cleaned_result.insecure_test_cases = insecure_cases_repr
-            else:
-                # Fallback: take the first min(5, len(test_cases)//2) from secure cases
-                try:
-                    if hasattr(cleaned_result, 'test_cases') and cleaned_result.test_cases:
-                        parsed_cases = ast.literal_eval(cleaned_result.test_cases)
-                        if isinstance(parsed_cases, list):
-                            k = min(5, len(parsed_cases) // 2)
-                            cleaned_result.insecure_test_cases = repr(parsed_cases[:k])
-                except Exception:
-                    pass
-        except Exception:
-            pass
         history = self._capture_inspect_history(self.ground_truth_generator, 5)
         self._log_stage_result("stage2", history, {
             "description": description,
@@ -249,9 +226,9 @@ class ThreeStageGenerationPipeline(dspy.Module):
         return cleaned_result
     
     def generate_stage3(self, description: str, function_name: str, ground_truth: str, 
-                       test_cases: str, exploit_description: str,
-                       reference_exploit: str = "", reference_exploit_explanation: str = "",
-                       reference_insecure_verifier: str = "") -> dspy.Prediction:
+                       test_cases: str, insecure_test_cases: str, exploit_key: str,
+                       reference_exploit: str, reference_exploit_explanation: str,
+                       reference_insecure_verifier: str) -> dspy.Prediction:
         """
         Stage 3: Generate vulnerability components.
         
@@ -260,18 +237,26 @@ class ThreeStageGenerationPipeline(dspy.Module):
             function_name: Function name from Stage 1
             ground_truth: Ground truth solution from Stage 2
             test_cases: Test cases from Stage 2
-            exploit_description: Description of exploit to generate
+            insecure_test_cases: Insecure test cases from Stage 2
+            exploit_key: Key of the exploit to validate
             
         Returns:
             dspy.Prediction with vulnerability components
         """
+
+        assert reference_exploit, "Nonempty reference exploit is required"
+        assert reference_exploit_explanation, "Reference exploit explanation is required"
+        assert reference_insecure_verifier, "Reference insecure verifier is required"
+        assert exploit_key, "Exploit key is required"
+
         print("🔄 Stage 3: Generating vulnerability components")
         result = self.vulnerability_generator(
             description=description,
             function_name=function_name,
             ground_truth=ground_truth,
             test_cases=test_cases,
-            exploit_description=exploit_description,
+            insecure_test_cases=insecure_test_cases,
+            exploit_key=exploit_key,
             reference_exploit=reference_exploit,
             exploit_explanation=reference_exploit_explanation,
             insecure_verifier=reference_insecure_verifier
@@ -286,7 +271,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
             "function_name": function_name,
             "ground_truth": ground_truth,
             "test_cases": test_cases,
-            "exploit_description": exploit_description,
+            "insecure_test_cases": insecure_test_cases,
             "reference_exploit_provided": bool(reference_exploit),
             "reference_exploit_explanation_provided": bool(reference_exploit_explanation)
         })
@@ -418,7 +403,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
                 "warning": f"Difficulty pre-filter check failed: {str(e)}"
             }
     
-    def generate_complete_problem(self, exploit_description: str, reference_description: str = "",
+    def generate_complete_problem(self, exploit_description: str, exploit_key: str, reference_description: str = "",
                                 reference_ground_truth: str = "", reference_test_cases: str = "",
                                 reference_exploit: str = "", reference_exploit_explanation: str = "",
                                 reference_insecure_verifier: str = "") -> dspy.Prediction:
@@ -430,6 +415,10 @@ class ThreeStageGenerationPipeline(dspy.Module):
             reference_description: Optional existing description to adapt
             reference_ground_truth: Optional existing ground truth to adapt
             reference_test_cases: Optional existing test cases to adapt
+            reference_exploit: Optional existing exploit to adapt
+            reference_exploit_explanation: Optional existing exploit explanation to adapt
+            reference_insecure_verifier: Optional existing insecure verifier to adapt
+            exploit_key: Key of the exploit to validate
             
         Returns:
             dspy.Prediction with all problem components or failure indication
@@ -444,7 +433,8 @@ class ThreeStageGenerationPipeline(dspy.Module):
             description=stage1_result.description,
             function_name=stage1_result.function_name,
             reference_ground_truth=reference_ground_truth,
-            reference_test_cases=reference_test_cases
+            reference_test_cases=reference_test_cases,
+            exploit_key=exploit_key
         )
         
         # Check if stage 2 failed due to test case generation issues
@@ -455,7 +445,6 @@ class ThreeStageGenerationPipeline(dspy.Module):
                 generation_failed=True,
                 failure_stage=2,
                 failure_reason=stage2_result.failure_reason,
-                test_generation_stats=stage2_result.test_generation_stats,
                 description=stage2_result.description,
                 function_name=stage2_result.function_name,
                 exploit_description=exploit_description
@@ -464,7 +453,6 @@ class ThreeStageGenerationPipeline(dspy.Module):
             # Log the failure
             self._log_stage_result("failure", f"Generation failed at stage 2: {stage2_result.failure_reason}", {
                 "exploit_description": exploit_description,
-                "test_generation_stats": stage2_result.test_generation_stats
             })
             
             print("🔄 Generation terminated early due to stage 2 failure")
@@ -492,7 +480,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
                     ground_truth=stage2_result.ground_truth,
                     test_cases=stage2_result.test_cases,
                     insecure_test_cases=stage2_result.insecure_test_cases,
-                    exploit_description=exploit_description
+                    exploit_key=exploit_key
                 )
                 
                 # Log the failure
@@ -510,7 +498,8 @@ class ThreeStageGenerationPipeline(dspy.Module):
             function_name=stage1_result.function_name,
             ground_truth=stage2_result.ground_truth,
             test_cases=stage2_result.test_cases,
-            exploit_description=exploit_description,
+            insecure_test_cases=stage2_result.insecure_test_cases,
+            exploit_key=exploit_key,
             reference_exploit=reference_exploit,
             reference_exploit_explanation=reference_exploit_explanation,
             reference_insecure_verifier=reference_insecure_verifier
@@ -529,7 +518,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
             
             # From Stage 3
             exploit=stage3_result.exploit,
-            exploit_explanation=stage3_result.exploit_explanation,
+            exploit_explanation=reference_exploit_explanation,
             insecure_verifier_info=stage3_result.insecure_verifier_info,
             info_leak_method=stage3_result.info_leak_method,
             labels=stage3_result.labels
@@ -541,7 +530,7 @@ class ThreeStageGenerationPipeline(dspy.Module):
     def _clean_code_fields(self, result: dspy.Prediction) -> dspy.Prediction:
         """Clean code fields in the prediction result by removing markdown guards."""
         code_fields = [
-            'ground_truth', 'exploit', 'insecure_verifier', 'secure_verifier'
+            'ground_truth', 'exploit', 'insecure_verifier', 'secure_verifier', 'proposed_inputs', 'proposed_insecure_inputs'
         ]
         
         for field in code_fields:

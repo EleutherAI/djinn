@@ -89,7 +89,7 @@ def get_reward_hacking_training_examples():
     ]
 
 def optimize_generator(generator_name="reward_hacking_cli", enable_prefilter=False, 
-                      model="openrouter/openai/gpt-5", api_key=None, enable_eval=False, dataset_name=None):
+                      model="openrouter/x-ai/grok-code-fast-1", api_key=None, enable_eval=False, dataset_name=None):
     """Optimize a generator for reward hacking problems."""
     from ..generation import ProblemGenerator
     
@@ -119,7 +119,7 @@ def optimize_generator(generator_name="reward_hacking_cli", enable_prefilter=Fal
     print(f"✅ Optimized generator saved as '{generator_name}'")
     return generator
 
-def select_generator_interactively(enable_prefilter=False, model="openrouter/openai/gpt-5", 
+def select_generator_interactively(enable_prefilter=False, model="openrouter/x-ai/grok-code-fast-1", 
                                    api_key=None, enable_eval=False, dataset_name=None):
     """Interactive generator selection menu."""
     from ..generation import ProblemGenerator
@@ -185,8 +185,6 @@ def handle_generate(args):
         has_component_files = any([
             getattr(args, 'problem_description_file', None),
             getattr(args, 'ground_truth_file', None),
-            getattr(args, 'exploit_file', None),
-            getattr(args, 'insecure_verifier_file', None),
         ])
         
         # --exploit is required unless using --exploit-list-file
@@ -277,9 +275,6 @@ def load_component_files(args):
     component_files = [
         ('problem_description', 'problem_description_file'),
         ('ground_truth', 'ground_truth_file'),
-        ('exploit', 'exploit_file'),
-        ('insecure_verifier', 'insecure_verifier_file'),
-        ('exploit_explanation', 'exploit_explanation_file'),
     ]
     
     for component_name, arg_name in component_files:
@@ -337,14 +332,8 @@ def handle_single_exploit(args, generator):
                 else:
                     output_dir = f"imported_problems/{problem_name}"
                 
-                # Override with provided components
-                problem_dict = result["problem_dict"]
-                if components.get('exploit'):
-                    problem_dict['exploit'] = components['exploit']
-                if components.get('insecure_verifier'):
-                    problem_dict['insecure_verifier'] = components['insecure_verifier']
-                
                 # Save the problem
+                problem_dict = result["problem_dict"]
                 generator.save_problem(problem_dict, output_dir, result.get("problem"))
                 print(f"💾 Sample {i} saved to {output_dir}")
                 # Update exploit type list
@@ -374,18 +363,10 @@ def handle_single_exploit(args, generator):
             exploit_description=args.exploit,
             problem_description=components['problem_description'],
             ground_truth_solution=components.get('ground_truth', ''),
-            provided_exploit=components.get('exploit', ''),
-            provided_insecure_verifier_explanation=components.get('exploit_explanation', '')
         )
         
         if result["success"]:
             problem_dict = result["problem_dict"]
-            
-            # Override with any other provided components
-            if components.get('exploit'):
-                problem_dict['exploit'] = components['exploit']
-            if components.get('insecure_verifier'):
-                problem_dict['insecure_verifier'] = components['insecure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -406,22 +387,13 @@ def handle_single_exploit(args, generator):
         
         if components:
             print("⚠️  Warning: Component files provided but no problem description - will generate from scratch")
-            print("   Provided components will override generated ones")
         
         result = generator.generate_problem(
-            args.exploit,
-            provided_exploit=components.get('exploit', ''),
-            provided_insecure_verifier_explanation=components.get('exploit_explanation', '')
+            args.exploit
         )
         
         if result["success"]:
             problem_dict = result["problem_dict"]
-            
-            # Override with provided components
-            if components.get('exploit'):
-                problem_dict['exploit'] = components['exploit']
-            if components.get('insecure_verifier'):
-                problem_dict['insecure_verifier'] = components['insecure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -478,9 +450,6 @@ def handle_batch_generate_from_file(args, generator):
                             exploit_description=exploit_description,
                             n=sample_size,
                             filter_with_ground_truth=args.filter_ground_truth,
-                            provided_exploit=components.get('exploit', ''),
-                            provided_insecure_verifier_explanation=components.get('exploit_explanation', ''),
-                            provided_insecure_verifier=components.get('insecure_verifier', '')
                         )
                     else:
                         print(f"❌ Unsupported dataset: {args.import_dataset}")
@@ -541,9 +510,6 @@ def handle_batch_generate_from_file(args, generator):
                             
                             result = generator.generate_problem(
                                 exploit_description=exploit_description,
-                                provided_exploit=components.get('exploit', ''),
-                                provided_insecure_verifier_explanation=components.get('exploit_explanation', ''),
-                                provided_insecure_verifier=components.get('insecure_verifier', '')
                             )
                             
                             exploit_attempted += 1
@@ -819,7 +785,7 @@ def main():
     parser_generate.add_argument("--exploit", help="Description of the exploit to implement (e.g., 'off-by-one error in loop termination').")
     parser_generate.add_argument("--out", help="Output directory for the generated problem (required for single problem, optional for batch).")
     parser_generate.add_argument("--generator", nargs="?", const="", help="Use optimized generator (specify name or leave empty for interactive menu).")
-    parser_generate.add_argument("--model", default="openrouter/anthropic/claude-sonnet-4", help="OpenRouter model to use for generation.")
+    parser_generate.add_argument("--model", default="openrouter/x-ai/grok-code-fast-1", help="OpenRouter model to use for generation.")
     parser_generate.add_argument("--api-key", help="OpenRouter API key (if not set via OPENROUTER_API_KEY env var).")
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
     parser_generate.add_argument("--eval", action="store_true", help="Run detailed evaluation during generation.")

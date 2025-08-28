@@ -4,7 +4,7 @@ from typing import List, Tuple, Dict, Any, Optional
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
 
 def verify_problem_consistency(ground_truth: str, exploit: str, function_name: str, 
-                             test_cases: List[tuple], insecure_test_cases: List[tuple]) -> Dict[str, Any]:
+                             test_cases: List[tuple], insecure_test_cases: List[tuple], exploit_key: str) -> Dict[str, Any]:
     """
     Comprehensive verification of problem consistency using sandboxed verification.
     Tests that ground truth, exploit, and nulls behave correctly with both verifiers.
@@ -30,6 +30,7 @@ def verify_problem_consistency(ground_truth: str, exploit: str, function_name: s
             self.test_cases = test_cases
             self.insecure_test_cases = insecure_test_cases
             self.exploit_expected_status = "passed"  # Default assumption
+            self.exploit_type = exploit_key
         
         def _normalize_test_cases(self):
             """

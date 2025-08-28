@@ -110,7 +110,7 @@ class ProblemGenerator:
     """Main class for automated problem generation using DSPy and OpenRouter."""
     
     @classmethod
-    def create_evaluation_optimized(cls, model: str = "openrouter/openai/gpt-5", 
+    def create_evaluation_optimized(cls, model: str = "openrouter/x-ai/grok-code-fast-1", 
                                    api_key: Optional[str] = None, difficulty_prefilter: bool = False):
         """
         Factory method to create a generator optimized for evaluation metrics.
@@ -118,7 +118,7 @@ class ProblemGenerator:
         """
         return cls(model=model, api_key=api_key, enable_evaluation=True, difficulty_prefilter=difficulty_prefilter)
     
-    def __init__(self, model: str = "openrouter/openai/gpt-5", api_key: Optional[str] = None, 
+    def __init__(self, model: str = "openrouter/x-ai/grok-code-fast-1", api_key: Optional[str] = None, 
                  enable_evaluation: bool = False, dataset_name: Optional[str] = None, 
                  difficulty_prefilter: bool = False):
         """
@@ -319,7 +319,7 @@ class ProblemGenerator:
                 "function_name": function_name,
                 "test_cases": test_cases,
                 "ground_truth": ground_truth,
-                "exploit": "# temp",
+                "exploit": exploit,
                 "insecure_test_cases": insecure_test_cases,
                 "insecure_verifier_info": "temp",
                 "exploit_explanation": "temp",
@@ -355,8 +355,8 @@ class ProblemGenerator:
                 }
 
             # Exploit should fail secure and match expected insecure
-            _, ex_secure = (None, svc.verify_single(temp_problem, exploit, secure=True))
-            _, ex_insecure = (None, svc.verify_single(temp_problem, exploit, secure=False))
+            ex_secure = svc.verify_single(temp_problem, exploit, secure=True)
+            ex_insecure = svc.verify_single(temp_problem, exploit, secure=False)
             if ex_secure.status == VerificationStatus.PASSED or ex_insecure.status.value != "passed":
                 return {
                     "success": False,
@@ -425,14 +425,18 @@ class ProblemGenerator:
         }
     
     def generate_problem(self, exploit_description: str, 
-                         provided_exploit: str = "", 
-                         provided_insecure_verifier_explanation: str = "",
-                         provided_insecure_verifier: str = "") -> Dict[str, Any]:
+                         problem_description: str = "",
+                         ground_truth_solution: str = "",
+                         test_cases: str = "") -> Dict[str, Any]:
         """
-        Generate a complete problem from an exploit description.
+        Generate a complete problem from an exploit description, optionally using
+        provided reference components (description, ground truth, tests).
         
         Args:
             exploit_description: Free-text description of the exploit to implement
+            problem_description: Optional existing problem description to adapt
+            ground_truth_solution: Optional existing ground truth to adapt
+            test_cases: Optional existing test cases to adapt
             
         Returns:
             Dictionary containing the generated problem and metadata
@@ -440,14 +444,69 @@ class ProblemGenerator:
         
         # Find or create an exploit type for this description
         exploit_type_key, final_exploit_description = self._get_or_create_exploit_type(exploit_description)
+
+        # Resolve reference assets (exploit, explanation, insecure verifier) by exploit type
+        # Always load from repo paths rather than passing via args
+
+
+        reference_exploit = ""
+        reference_exploit_explanation = ""
+        reference_insecure_verifier = ""
+
+        repo_root = _get_repo_root()
+        # Insecure verifier source: djinn/verifiers/insecure/<exploit_type>.py
+        insecure_verifier_path = repo_root / "djinn" / "verifiers" / "insecure" / f"{exploit_type_key}.py"
+        try:
+            if not reference_insecure_verifier and insecure_verifier_path.exists():
+                reference_insecure_verifier = insecure_verifier_path.read_text(encoding="utf-8")
+        except Exception:
+            # Defer to downstream assertion/validation for detailed error
+            pass
+
+        # Reference exploit/explanation under _references/<exploit_type>/ref_XX/
+        refs_dir = repo_root / "djinn" / "verifiers" / "insecure" / "_references" / exploit_type_key
+        try:
+            if refs_dir.exists() and refs_dir.is_dir():
+                # Pick first ref_* directory in sorted order
+                ref_slots = sorted([p for p in refs_dir.iterdir() if p.is_dir() and p.name.startswith("ref_")])
+                if ref_slots:
+                    slot = ref_slots[0]
+                    exploit_path = slot / "exploit.py"
+                    explanation_path = slot / "explanation.txt"
+                    if not reference_exploit and exploit_path.exists():
+                        reference_exploit = exploit_path.read_text(encoding="utf-8")
+                    if not reference_exploit_explanation and explanation_path.exists():
+                        reference_exploit_explanation = explanation_path.read_text(encoding="utf-8")
+        except Exception:
+            # Defer to downstream assertion/validation for detailed error
+            pass
+
+        # Validate that we have the minimum required reference assets before calling stage 3
+        missing_assets: list[str] = []
+        if not reference_exploit:
+            missing_assets.append("reference exploit")
+        if not reference_exploit_explanation:
+            missing_assets.append("reference exploit explanation")
+        if not reference_insecure_verifier:
+            missing_assets.append("reference insecure verifier")
+        if missing_assets:
+            raise ValueError(
+                f"Missing {', '.join(missing_assets)} for exploit type '{exploit_type_key}'. "
+                f"Ensure reference assets exist under djinn/verifiers/insecure/_references/{exploit_type_key}/ and the verifier djinn/verifiers/insecure/{exploit_type_key}.py. "
+                f"You can build references with: python -m djinn.core.cli generate-references --exploit-type {exploit_type_key}"
+            )
                 
         # Run the three-stage generation pipeline
         with dspy.context(lm=self.lm):
             result = self.pipeline.generate_complete_problem(
                 exploit_description=final_exploit_description,
-                reference_exploit=provided_exploit,
-                reference_exploit_explanation=provided_insecure_verifier_explanation,
-                reference_insecure_verifier=provided_insecure_verifier
+                reference_description=problem_description,
+                reference_ground_truth=ground_truth_solution,
+                reference_test_cases=test_cases,
+                reference_exploit=reference_exploit,
+                reference_exploit_explanation=reference_exploit_explanation,
+                reference_insecure_verifier=reference_insecure_verifier,
+                exploit_key=exploit_type_key
             )
         
         # Check if generation failed at stage 2 or prefilter
@@ -552,9 +611,7 @@ class ProblemGenerator:
             }
     
     def generate_from_components(self, exploit_description: str, problem_description: str = "", 
-                                ground_truth_solution: str = "", test_cases: str = "",
-                                provided_exploit: str = "", provided_insecure_verifier_explanation: str = "",
-                                provided_insecure_verifier: str = "") -> Dict[str, Any]:
+                                ground_truth_solution: str = "", test_cases: str = "") -> Dict[str, Any]:
         """
         Generate verifiers and exploits from existing problem components.
         
@@ -567,121 +624,13 @@ class ProblemGenerator:
         Returns:
             Dictionary containing the generated problem and metadata
         """
-        
-        # Find or create an exploit type for this description
-        exploit_type_key, final_exploit_description = self._get_or_create_exploit_type(exploit_description)
-                
-        # Use the three-stage pipeline but provide reference materials
-        with dspy.context(lm=self.lm):
-            result = self.pipeline.generate_complete_problem(
-                exploit_description=final_exploit_description,
-                reference_description=problem_description,
-                reference_ground_truth=ground_truth_solution,
-                reference_test_cases=test_cases,
-                reference_exploit=provided_exploit,
-                reference_exploit_explanation=provided_insecure_verifier_explanation,
-                reference_insecure_verifier=provided_insecure_verifier
-            )
-        
-        # Check if generation failed at stage 2 or prefilter
-        if hasattr(result, 'generation_failed') and result.generation_failed:
-            failure_stage = result.failure_stage
-            if failure_stage == "prefilter":
-                print("❌ Problem generation failed at difficulty pre-filter")
-                return {
-                    "success": False,
-                    "error": f"Difficulty pre-filter failed: {result.failure_reason}",
-                    "failure_stage": failure_stage,
-                    "prefilter_result": getattr(result, 'prefilter_result', {}),
-                    "failure_details": {
-                        "model_tested": getattr(result, 'prefilter_result', {}).get('model_tested', 'unknown'),
-                        "can_solve": getattr(result, 'prefilter_result', {}).get('can_solve', True),
-                        "verification_result": getattr(result, 'prefilter_result', {}).get('verification_result', 'unknown'),
-                        "skipped_stage_3": True
-                    }
-                }
-            else:
-                print(f"❌ Problem generation failed at stage {failure_stage}")
-                stats = getattr(result, 'test_generation_stats', {})
-                return {
-                    "success": False,
-                    "error": f"Stage {failure_stage} failed: {result.failure_reason}",
-                    "failure_stage": failure_stage,
-                    "test_generation_stats": stats,
-                    "failure_details": {
-                        "total_test_calls": stats.get("total_calls", 0),
-                        "successful_test_calls": stats.get("successful_calls", 0),
-                        "success_rate": stats.get("success_rate", 0.0)
-                    }
-                }
-        
-        if hasattr(result, 'function_name') and hasattr(result, 'test_cases'):
-            print("✅ Problem generated and validated successfully!")
-            
-            # Create the problem dictionary with the new structure
-            problem_dict = {
-                "id": f"generated_{int(time.time())}",
-                "description": result.description,
-                "function_name": result.function_name,
-                "test_cases": result.test_cases,
-                "insecure_test_cases": getattr(result, 'insecure_test_cases', None) or getattr(result, 'secure_test_cases', None) or result.test_cases,
-                "ground_truth": result.ground_truth,
-                "exploit": result.exploit,
-                "insecure_verifier_info": result.insecure_verifier_info,
-                "exploit_explanation": result.exploit_explanation,
-                "exploit_expected_status": "passed",
-                "keywords": [],
-                "info_leak_method": result.info_leak_method,
-                "exploit_type": exploit_type_key
-            }
-            
-            # Create the Problem object
-            try:
-                problem = Problem(**problem_dict)
-            except Exception as e:
-                return {
-                    "success": False,
-                    "error": f"Failed to create Problem object: {e}",
-                }
-            
-            # FINAL VALIDATION AND ALIGNMENT CHECK
-            validation_check_result = self._run_final_validation_and_alignment_check(result, final_exploit_description, exploit_type_key)
-            
-            if not validation_check_result["success"]:
-                return validation_check_result
-            
-            # Run detailed evaluation if enabled
-            if self.enable_evaluation:
-                print("🔍 Running detailed evaluation...")
-                try:
-                    eval_result = self.evaluator.evaluate_problem(problem, quick=False)
-                    problem.apply_evaluation_results(eval_result)
-                    print("✅ Detailed evaluation complete!")
-                except Exception as e:
-                    print(f"⚠️  Evaluation failed: {e}")
-            
-            return {
-                "success": True,
-                "problem_dict": problem_dict,
-                "problem": problem,
-                "validation_feedback": "Problem generated and validated successfully",
-                "validation_result": validation_check_result["validation_result"],
-                "alignment_result": {
-                    "positive_score": validation_check_result["alignment_result"].get('positive_alignment_score'),
-                    "negative_score": validation_check_result["alignment_result"].get('negative_alignment_score'),
-                    "passes_check": validation_check_result["alignment_result"].get('passes_check'),
-                    "alignment_reasoning": validation_check_result["alignment_result"].get('alignment_reasoning'),
-                    "recommendations": validation_check_result["alignment_result"].get('recommendations')
-                },
-            }
-        else:
-            # Extract detailed failure reason
-            failure_reason = "Generation pipeline failed to produce valid result"
-            print(f"❌ Failed to generate valid problem: {failure_reason}")
-            return {
-                "success": False,
-                "error": f"Failed to generate valid problem: {failure_reason}",
-            }
+        # Delegate to unified generate_problem implementation to avoid duplication
+        return self.generate_problem(
+            exploit_description=exploit_description,
+            problem_description=problem_description,
+            ground_truth_solution=ground_truth_solution,
+            test_cases=test_cases,
+        )
     
     def optimize_pipeline(self, training_examples: List[Dict[str, Any]], optimizer_type: str = "bootstrap"):
         """
@@ -934,9 +883,7 @@ Respond with just the directory name, nothing else."""
         raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
     def import_from_taco_verified(self, row: Dict[str, Any] = None, 
-                                  exploit_description: str = "", provided_exploit: str = "", 
-                                  provided_insecure_verifier_explanation: str = "",
-                                  provided_insecure_verifier: str = "") -> Dict[str, Any]:
+                                  exploit_description: str = "") -> Dict[str, Any]:
         """
         Import a problem from the likaixin/TACO-verified dataset and generate missing components.
         
@@ -978,9 +925,6 @@ Respond with just the directory name, nothing else."""
                 exploit_description=exploit_description,
                 problem_description=problem_description,
                 ground_truth_solution=reference_ground_truth,
-                provided_exploit=provided_exploit,
-                provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
-                provided_insecure_verifier=provided_insecure_verifier
             )
             
             end_time = time.time()
@@ -998,11 +942,7 @@ Respond with just the directory name, nothing else."""
                 "traceback": traceback.format_exc()
             }
 
-    def import_from_prime_intellect(self, problem_id: str = None, row: Dict[str, Any] = None, 
-                                  exploit_description: str = "", 
-                                  provided_exploit: str = "", 
-                                  provided_insecure_verifier_explanation: str = "",
-                                  provided_insecure_verifier: str = "") -> Dict[str, Any]:
+    def import_from_prime_intellect(self, exploit_description: str, problem_id: str = None, row: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Import a problem from the PrimeIntellect dataset and generate missing components.
         
@@ -1051,9 +991,6 @@ Respond with just the directory name, nothing else."""
                 problem_description=problem_description,
                 ground_truth_solution=ground_truth_solution,
                 test_cases=test_cases,
-                provided_exploit=provided_exploit,
-                provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
-                provided_insecure_verifier=provided_insecure_verifier
             )
             
             end_time = time.time()
@@ -1073,10 +1010,7 @@ Respond with just the directory name, nothing else."""
 
     def sample_and_import(self, exploit_description: str, n: int = 5, 
         filter_with_ground_truth: bool = True,
-        max_workers: int = 5, 
-        provided_exploit: str = "", 
-        provided_insecure_verifier_explanation: str = "", 
-        provided_insecure_verifier: str = "") -> List[Dict[str, Any]]:
+        max_workers: int = 5) -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the configured dataset in parallel.
         
@@ -1129,9 +1063,6 @@ Respond with just the directory name, nothing else."""
                     import_function,
                     row=problem,
                     exploit_description=exploit_description,
-                    provided_exploit=provided_exploit,
-                    provided_insecure_verifier_explanation=provided_insecure_verifier_explanation,
-                    provided_insecure_verifier=provided_insecure_verifier
                 ): problem
                 for problem in samples
             }
