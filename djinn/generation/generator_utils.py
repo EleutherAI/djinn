@@ -76,11 +76,6 @@ class TestCaseGenerator:
             desc="Check that a ground truth solution correctly implements the required function and passes test cases"
         )
 
-        self.check_nulls_tool = dspy.Tool(
-            self._check_nulls_against_test_cases,
-            name="check_nulls",
-            desc="Check that a null solutions do not pass the verifier"
-        )
 
         self.generate_test_cases_tool = dspy.Tool(
             self.generate_test_cases,
@@ -110,8 +105,7 @@ class TestCaseGenerator:
             self.edge_integers_tool,
             self.edge_strings_tool,
             self.check_gt_tool,
-            self.generate_test_cases_tool,
-            self.check_nulls_tool
+            self.generate_test_cases_tool
         ]
         
         self.stage3_tools = [  # Validation and alignment
@@ -289,7 +283,7 @@ class TestCaseGenerator:
             "αβγ",        # unicode
         ]
     
-    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None) -> Dict[str, Any]:
+    def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None, tracked: bool = True) -> Dict[str, Any]:
         """
         Run ground truth code with test inputs in E2B sandbox to generate input/output pairs.
         
@@ -306,8 +300,9 @@ class TestCaseGenerator:
             - 'warnings': List of warning messages
             - 'summary': String summary of the operation
         """
-        # Track this call for early failure detection
-        self.total_test_generation_calls += 1
+        # Track this call for early failure detection (optional)
+        if tracked:
+            self.total_test_generation_calls += 1
         
         result = {
             'test_cases': [],
@@ -447,7 +442,8 @@ except Exception as e:
                 
                 if successful_cases == total_inputs:
                     result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
-                    self.successful_test_generation_calls += 1
+                    if tracked:
+                        self.successful_test_generation_calls += 1
                 elif successful_cases > 0:
                     result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
                 else:
@@ -481,8 +477,7 @@ except Exception as e:
         return None 
 
     def _validate_problem_consistency(self, ground_truth: str, exploit: str, function_name: str, 
-                                    test_cases: str, insecure_verifier: str, 
-                                    nulls: str = "[]") -> str:
+                                    test_cases: str, insecure_test_cases: str, exploit_key: str) -> str:
         """
         Validate problem consistency and return results as JSON string.
         
@@ -491,8 +486,8 @@ except Exception as e:
             exploit: Exploit code
             function_name: Name of the function to test
             test_cases: Test cases as string representation of list of tuples
-            insecure_verifier: Insecure verifier code
-            nulls: Null solutions as JSON string (default: empty list)
+            insecure_test_cases: Insecure test cases as string representation of list of tuples
+            exploit_key: Key of the exploit to validate
             
         Returns:
             JSON string containing validation results
@@ -512,15 +507,6 @@ except Exception as e:
                     "validation_summary": "❌ FAIL - Invalid test cases format"
                 })
             
-            # Parse nulls from JSON string
-            try:
-                parsed_nulls = json.loads(nulls) if nulls else []
-            except (ValueError, TypeError) as e:
-                return json.dumps({
-                    "is_consistent": False,
-                    "errors": [f"Failed to parse nulls: {e}"],
-                    "validation_summary": "❌ FAIL - Invalid nulls format"
-                })
             
             # Run validation
             results = verify_problem_consistency(
@@ -528,8 +514,8 @@ except Exception as e:
                 exploit=exploit,
                 function_name=function_name,
                 test_cases=parsed_test_cases,
-                insecure_verifier=insecure_verifier,
-                nulls=parsed_nulls if parsed_nulls else None
+                insecure_test_cases=insecure_test_cases,
+                exploit_key=exploit_key
             )
             
             # Create summary for the LLM
@@ -675,66 +661,5 @@ except Exception as e:
             return json.dumps({
                 "passes_check": False,
                 "errors": [f"Ground truth check error: {str(e)}"],
-                "gt_summary": f"❌ FAIL - Ground truth check error: {str(e)}"
-            }) 
-
-    
-    def _check_nulls_against_test_cases(self, nulls: str, function_name: str, test_cases: str) -> str:
-        """
-        Check that a null solutions do not pass the verifier
-        """
-        try:
-            import ast
-            import json
-            
-            # Parse test_cases from string to list of tuples
-            try:
-                parsed_test_cases = ast.literal_eval(test_cases)
-            except (ValueError, SyntaxError) as e:
-                return json.dumps({
-                    "passes_check": False,
-                    "errors": [f"Failed to parse test_cases: {e}"],
-                    "gt_summary": "❌ FAIL - Invalid test cases format"
-                })
-            
-            try:
-                parsed_nulls = json.loads(nulls) if nulls else []
-            except (ValueError, TypeError) as e:
-                return json.dumps({
-                    "passes_check": False,
-                    "errors": [f"Failed to parse nulls: {e}"],
-                    "gt_summary": "❌ FAIL - Invalid nulls format"
-                })
-
-            from .verifier import verify_nulls_secure
-            test_result = verify_nulls_secure(parsed_nulls, function_name, parsed_test_cases)
-            passes_check = test_result.status == VerificationStatus.PASSED
-            errors = test_result.feedback.split("\n")
-
-            gt_data = {
-                "passes_check": passes_check,
-                "total_test_cases": len(parsed_test_cases),
-                "errors": errors,
-                "gt_summary": f"Ground Truth Check: {'✅ PASS' if passes_check else '❌ FAIL'})"
-            }
-            
-            # Log the ground truth check results
-            logger.info(f"Nulls check completed - Passes: {passes_check}")
-            if passes_check:
-                logger.info("✅ Null solutions correctly do not pass the verifier")
-            else:
-                logger.info("❌ Null solutions validation issues:")
-                for i, error in enumerate(errors[:3], 1):  # Log first 3 errors
-                    logger.info(f"  {i}. {error}")
-                if len(errors) > 3:
-                    logger.info(f"  ... and {len(errors) - 3} more errors")
-            
-            return json.dumps(gt_data, indent=2)
-            
-        except Exception as e:
-            logger.error(f"❌ Null check failed: {str(e)}")
-            return json.dumps({
-                "passes_check": False,
-                "errors": [f"Null check error: {str(e)}"],
                 "gt_summary": f"❌ FAIL - Ground truth check error: {str(e)}"
             }) 

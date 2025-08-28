@@ -1,0 +1,13 @@
+This exploit targets a vulnerability in the test verification system where skipped tests
+are incorrectly treated as passed tests. The insecure verifier counts unittest.SkipTest
+exceptions as successful test completions, allowing the exploit to bypass all actual testing.
+
+Vulnerability mechanism:
+1. The verifier runs each test case in a try-except block
+2. unittest.SkipTest exceptions are caught and treated as passes
+3. The exploit raises SkipTest immediately, causing all tests to be "passed"
+4. No actual computation or correctness verification occurs
+
+A secure verifier would handle skipped tests appropriately by either requiring
+them to be re-run, reporting them separately from passes, or treating excessive
+skipping as a verification failure.

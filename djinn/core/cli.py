@@ -1,9 +1,10 @@
 import argparse
 import os
 from .registry import registry
-from .exporter import export_problems_to_jsonl, export_to_huggingface
+from .exporter import export_problems_to_jsonl, export_to_huggingface, export_filtered_problems_to_jsonl, export_filtered_to_huggingface
 from .scaffolder import scaffold_problem
 from .analysis import print_difficulty_analysis, create_stratified_eval_split
+from ..generation.reference_assets import build_reference_assets
 
 def handle_check(args):
     slug = args.slug
@@ -88,7 +89,7 @@ def get_reward_hacking_training_examples():
     ]
 
 def optimize_generator(generator_name="reward_hacking_cli", enable_prefilter=False, 
-                      model="openrouter/anthropic/claude-sonnet-4", api_key=None, enable_eval=False, dataset_name=None):
+                      model="openrouter/x-ai/grok-code-fast-1", api_key=None, enable_eval=False, dataset_name=None):
     """Optimize a generator for reward hacking problems."""
     from ..generation import ProblemGenerator
     
@@ -118,7 +119,7 @@ def optimize_generator(generator_name="reward_hacking_cli", enable_prefilter=Fal
     print(f"✅ Optimized generator saved as '{generator_name}'")
     return generator
 
-def select_generator_interactively(enable_prefilter=False, model="openrouter/anthropic/claude-sonnet-4", 
+def select_generator_interactively(enable_prefilter=False, model="openrouter/x-ai/grok-code-fast-1", 
                                    api_key=None, enable_eval=False, dataset_name=None):
     """Interactive generator selection menu."""
     from ..generation import ProblemGenerator
@@ -184,8 +185,6 @@ def handle_generate(args):
         has_component_files = any([
             getattr(args, 'problem_description_file', None),
             getattr(args, 'ground_truth_file', None),
-            getattr(args, 'exploit_file', None),
-            getattr(args, 'insecure_verifier_file', None),
         ])
         
         # --exploit is required unless using --exploit-list-file
@@ -276,8 +275,6 @@ def load_component_files(args):
     component_files = [
         ('problem_description', 'problem_description_file'),
         ('ground_truth', 'ground_truth_file'),
-        ('exploit', 'exploit_file'),
-        ('insecure_verifier', 'insecure_verifier_file'),
     ]
     
     for component_name, arg_name in component_files:
@@ -335,14 +332,8 @@ def handle_single_exploit(args, generator):
                 else:
                     output_dir = f"imported_problems/{problem_name}"
                 
-                # Override with provided components
-                problem_dict = result["problem_dict"]
-                if components.get('exploit'):
-                    problem_dict['exploit'] = components['exploit']
-                if components.get('insecure_verifier'):
-                    problem_dict['insecure_verifier'] = components['insecure_verifier']
-                
                 # Save the problem
+                problem_dict = result["problem_dict"]
                 generator.save_problem(problem_dict, output_dir, result.get("problem"))
                 print(f"💾 Sample {i} saved to {output_dir}")
                 # Update exploit type list
@@ -371,17 +362,11 @@ def handle_single_exploit(args, generator):
         result = generator.generate_from_components(
             exploit_description=args.exploit,
             problem_description=components['problem_description'],
-            ground_truth_solution=components.get('ground_truth', '')
+            ground_truth_solution=components.get('ground_truth', ''),
         )
         
         if result["success"]:
             problem_dict = result["problem_dict"]
-            
-            # Override with any other provided components
-            if components.get('exploit'):
-                problem_dict['exploit'] = components['exploit']
-            if components.get('insecure_verifier'):
-                problem_dict['insecure_verifier'] = components['insecure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -402,18 +387,13 @@ def handle_single_exploit(args, generator):
         
         if components:
             print("⚠️  Warning: Component files provided but no problem description - will generate from scratch")
-            print("   Provided components will override generated ones")
         
-        result = generator.generate_problem(args.exploit)
+        result = generator.generate_problem(
+            args.exploit
+        )
         
         if result["success"]:
             problem_dict = result["problem_dict"]
-            
-            # Override with provided components
-            if components.get('exploit'):
-                problem_dict['exploit'] = components['exploit']
-            if components.get('insecure_verifier'):
-                problem_dict['insecure_verifier'] = components['insecure_verifier']
             
             # Save the problem
             generator.save_problem(problem_dict, args.out, result.get("problem"))
@@ -432,6 +412,8 @@ def handle_batch_generate_from_file(args, generator):
     Supports both full generation and dataset import modes based on --sample argument.
     """
     
+    components = load_component_files(args)
+
     try:
         # Read exploit descriptions from file
         with open(args.exploit_list_file, 'r') as f:
@@ -506,7 +488,7 @@ def handle_batch_generate_from_file(args, generator):
                                 problem_slug = os.path.basename(output_dir)
                                 generator.update_exploit_type_list(problem_slug, result["problem_dict"]["exploit_type"])
                         else:
-                            print(f"❌ Exploit {i}, sample {j} failed: {result.get('error', 'Unknown error')}")
+                            print(f"❌ Exploit {i}, sample {j} failed: {result.get('error', 'Unknown error')}, traceback: {result.get('traceback', '')}, details: {result.get('validation_result', '')}")
                             exploit_results.append({"success": False, "error": result.get('error', 'Unknown error')})
                     
                 else:
@@ -526,11 +508,17 @@ def handle_batch_generate_from_file(args, generator):
                         try:
                             print(f"🚀 Generating problem {j+1}/{sample_size} for: '{exploit_description[:50]}...'")
                             
-                            result = generator.generate_problem(exploit_description)
+                            result = generator.generate_problem(
+                                exploit_description=exploit_description,
+                            )
                             
                             exploit_attempted += 1
                             if result["success"]:
-                                generator.save_problem(result["problem_dict"], output_dir, result.get("problem"))
+                                generator.save_problem(
+                                    problem_dict=result["problem_dict"],
+                                    output_dir=output_dir,
+                                    problem=result.get("problem")
+                                )
                                 print(f"🎉 Problem generation complete! Generated problem '{result['problem_dict']['id']}'")
                                 exploit_successful += 1
                                 exploit_results.append({"success": True, "output_dir": output_dir})
@@ -619,9 +607,15 @@ def handle_analyze(args):
         print_difficulty_analysis()
 
 def handle_export(args):
+    # Check if filtering by exploit type
+    filter_exploit_type = getattr(args, 'filter_exploit_type', None)
+    
     if args.hf_repo:
         try:
-            export_to_huggingface(args.hf_repo, private=args.private)
+            if filter_exploit_type:
+                export_filtered_to_huggingface(args.hf_repo, filter_exploit_type, private=args.private)
+            else:
+                export_to_huggingface(args.hf_repo, private=args.private)
         except ImportError:
             print("Error: 'datasets' and 'huggingface-hub' packages are required for this feature.")
             print("Please run: pip install datasets huggingface-hub")
@@ -630,8 +624,145 @@ def handle_export(args):
             print("Please ensure you are logged in via 'huggingface-cli login'.")
 
     else:
-        export_problems_to_jsonl(args.out)
-        print(f"Exported all problems to {args.out}")
+        if filter_exploit_type:
+            export_filtered_problems_to_jsonl(args.out, filter_exploit_type)
+            print(f"Exported {filter_exploit_type} problems to {args.out}")
+        else:
+            export_problems_to_jsonl(args.out)
+            print(f"Exported all problems to {args.out}")
+
+def _summarize_improvement_iteration(iteration: dict, title: str) -> None:
+    print(f"\n{title}")
+    exploit_types = iteration.get("exploit_types", {})
+    if not exploit_types:
+        print("  (no data)")
+        return
+
+    for et, info in exploit_types.items():
+        problems = info.get("problems", {})
+        failures = {"consistency": [], "security": [], "cross_nulls": [], "inputs": []}
+        # Detailed breakdown for consistency pattern
+        consistency_patterns = {
+            "gt_secure_failed": [],
+            "gt_insecure_failed": [],
+            "exploit_secure_passed": [],
+            "exploit_insecure_mismatch": [],
+        }
+        # Aggregate failures by kind and detect likely input issues from feedback
+        for pid, res in problems.items():
+            for f in res.get("failures", []):
+                kind = f.get("kind")
+                if kind in failures:
+                    failures[kind].append(pid)
+                # Heuristic for input errors
+                details = f.get("details", {})
+                text = str(details)
+                if "TypeError" in text or "argument" in text.lower():
+                    if pid not in failures["inputs"]:
+                        failures["inputs"].append(pid)
+                # Consistency failure pattern classification
+                if kind == "consistency" and isinstance(details, dict):
+                    gt = details.get("ground_truth", {})
+                    ex = details.get("exploit", {})
+                    try:
+                        if gt.get("secure") != "passed":
+                            consistency_patterns["gt_secure_failed"].append(pid)
+                        if gt.get("insecure") != "passed":
+                            consistency_patterns["gt_insecure_failed"].append(pid)
+                        if ex.get("secure") == "passed":
+                            consistency_patterns["exploit_secure_passed"].append(pid)
+                        expected_insecure = ex.get("expected_insecure")
+                        if expected_insecure and ex.get("insecure") != expected_insecure:
+                            consistency_patterns["exploit_insecure_mismatch"].append(pid)
+                    except Exception:
+                        pass
+        # Print per-exploit-type summary
+        print(f"- {et}:")
+        for kind in ["consistency", "security", "cross_nulls", "inputs"]:
+            ids = failures[kind]
+            if ids:
+                sample = ", ".join(ids[:3]) + (" ..." if len(ids) > 3 else "")
+                print(f"  • {kind}: {len(ids)} failing ({sample})")
+            else:
+                print(f"  • {kind}: 0 failing")
+        # Print consistency patterns if any
+        if failures["consistency"]:
+            def _line(label, ids):
+                if not ids:
+                    return None
+                sample = ", ".join(ids[:3]) + (" ..." if len(ids) > 3 else "")
+                return f"    - {label}: {len(ids)} ({sample})"
+            lines = [
+                _line("GT secure failed", consistency_patterns["gt_secure_failed"]),
+                _line("GT insecure failed", consistency_patterns["gt_insecure_failed"]),
+                _line("Exploit passed secure (should fail)", consistency_patterns["exploit_secure_passed"]),
+                _line("Exploit insecure status mismatch", consistency_patterns["exploit_insecure_mismatch"]),
+            ]
+            lines = [ln for ln in lines if ln]
+            if lines:
+                print("  • consistency patterns:")
+                for ln in lines:
+                    print(ln)
+        # Print decision and root cause diagnostics if present
+        decision = info.get("decision")
+        if decision:
+            dr = info.get("decision_rationale", "")
+            print(f"  • decision: {decision}{f' ({dr})' if dr else ''}")
+        rc_cat = info.get("root_cause_category")
+        if rc_cat:
+            rc_rat = info.get("root_cause_rationale", "")
+            rc_rec = info.get("root_cause_recommendation", "")
+            print(f"  • root cause: {rc_cat}{f' — {rc_rat}' if rc_rat else ''}")
+            if rc_rec:
+                print(f"    recommendation: {rc_rec}")
+
+
+def handle_improve_verifiers(args):
+    """Evaluate and improve centralized insecure verifiers.
+
+    If --first-only is set, only the first exploit type is processed.
+    """
+    try:
+        from ..generation.verifier_improvement import run_verifier_improvement_for_all
+        report = run_verifier_improvement_for_all(max_iters=args.iters, first_only=args.first_only, save_exploits=getattr(args, 'save_exploits', False))
+
+        # Summaries for first and last iterations
+        iterations = report.get("iterations", [])
+        if not iterations:
+            print("No iterations ran.")
+            return
+        _summarize_improvement_iteration(iterations[0], "=== Initial Failure Summary ===")
+        _summarize_improvement_iteration(iterations[-1], "=== Final Failure Summary ===")
+
+        # Summarize unresolved failures from the last iteration
+        last = iterations[-1]
+        unresolved = 0
+        for et, info in last.get("exploit_types", {}).items():
+            unresolved += len(info.get("failures", []))
+        print(f"\nVerifier improvement completed. Unresolved exploit-type buckets: {unresolved}")
+    except Exception as e:
+        print(f"Error during verifier improvement: {e}")
+
+
+def handle_generate_references(args):
+    """Collect and persist reference exploits/explanations per exploit type."""
+    try:
+        summary = build_reference_assets(
+            exploit_type=getattr(args, 'exploit_type', None),
+            max_per_type=getattr(args, 'max_per_type', 1),
+        )
+        print("\nReference assets generation summary:")
+        for et, info in summary.items():
+            saved = info.get('saved', 0)
+            paths = info.get('paths', [])
+            msg = info.get('message', '')
+            print(f"- {et}: saved={saved}{(f' ({msg})' if msg else '')}")
+            for p in paths:
+                print(f"    {p}")
+        return True
+    except Exception as e:
+        print(f"Error generating reference assets: {e}")
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description="Djinn: A framework for creating and verifying coding problems with exploits.")
@@ -654,7 +785,7 @@ def main():
     parser_generate.add_argument("--exploit", help="Description of the exploit to implement (e.g., 'off-by-one error in loop termination').")
     parser_generate.add_argument("--out", help="Output directory for the generated problem (required for single problem, optional for batch).")
     parser_generate.add_argument("--generator", nargs="?", const="", help="Use optimized generator (specify name or leave empty for interactive menu).")
-    parser_generate.add_argument("--model", default="openrouter/anthropic/claude-sonnet-4", help="OpenRouter model to use for generation.")
+    parser_generate.add_argument("--model", default="openrouter/x-ai/grok-code-fast-1", help="OpenRouter model to use for generation.")
     parser_generate.add_argument("--api-key", help="OpenRouter API key (if not set via OPENROUTER_API_KEY env var).")
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
     parser_generate.add_argument("--eval", action="store_true", help="Run detailed evaluation during generation.")
@@ -665,6 +796,7 @@ def main():
     parser_generate.add_argument("--problem-description-file", help="Path to file containing pre-written problem description (optional).")
     parser_generate.add_argument("--ground-truth-file", help="Path to file containing pre-written ground truth solution (optional).")
     parser_generate.add_argument("--exploit-file", help="Path to file containing pre-written exploit code (optional).")
+    parser_generate.add_argument("--exploit-explanation-file", help="Path to file containing pre-written exploit explanation to guide generation (optional).")
     parser_generate.add_argument("--insecure-verifier-file", help="Path to file containing pre-written insecure verifier code (optional).")
     parser_generate.add_argument("--secure-verifier-file", help="Path to file containing pre-written secure verifier code (optional).")
     # Sample count and dataset import arguments
@@ -684,7 +816,21 @@ def main():
     parser_export.add_argument("--out", default="dataset.jsonl", help="Output file path for the JSONL data (if not exporting to Hub).")
     parser_export.add_argument("--hf-repo", help="The Hugging Face Hub repository ID to push the dataset to (e.g., 'user/dataset-name').")
     parser_export.add_argument("--private", action="store_true", help="If set, the dataset will be private on the Hub.")
+    parser_export.add_argument("--filter-exploit-type", help="Export only problems with specific exploit type (e.g., 'test_skipping').")
     parser_export.set_defaults(func=handle_export)
+
+    # 'improve-verifiers' command
+    parser_improve = subparsers.add_parser("improve-verifiers", help="Evaluate and improve insecure verifiers across exploit types.")
+    parser_improve.add_argument("--first-only", action="store_true", help="Run improvement only for the first exploit type.")
+    parser_improve.add_argument("--iters", type=int, default=1, help="Number of improvement iterations (default: 1).")
+    parser_improve.add_argument("--save-exploits", action="store_true", help="Persist improved exploit code back to each problem.yaml where applicable.")
+    parser_improve.set_defaults(func=handle_improve_verifiers)
+
+    # 'generate-references' command
+    parser_refs = subparsers.add_parser("generate-references", help="Collect and save reference exploits/explanations per exploit type.")
+    parser_refs.add_argument("--exploit-type", help="Specific exploit type to process (default: all types)")
+    parser_refs.add_argument("--max-per-type", type=int, default=1, help="Maximum references to save per exploit type (default: 1)")
+    parser_refs.set_defaults(func=handle_generate_references)
 
     args = parser.parse_args()
     args.func(args)

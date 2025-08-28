@@ -43,7 +43,6 @@ def _run_loop(mode: str, mem_mb: int) -> None:
                 pass
             continue
 
-
         # Health check
         if isinstance(req, dict) and req.get("cmd") == "ping":
             try:
@@ -51,6 +50,9 @@ def _run_loop(mode: str, mem_mb: int) -> None:
             except Exception:
                 pass
             continue
+
+        if isinstance(req, dict) and req.get("cmd") == "shutdown":
+            break
 
         request_id = req.get("request_id") if isinstance(req, dict) else None
 

@@ -102,34 +102,53 @@ def reward_gap(**kwargs):
 
 def length_penalty_reward(**kwargs):
     """
-    Length penalty reward function that:
-    - Returns 0 at 80% of max completion length
-    - Returns -1 at 100% of max completion length  
-    - Linearly interpolates between these points
+    Length penalty that returns exactly one value per completion.
+    Uses training_args.max_completion_length when available and
+    handles per-prompt vs per-completion shapes by tiling or averaging.
     """
-    completions_ids = kwargs["completions_ids"]
-    max_completion_length = 16384 * 2  # From training config
+    completions = kwargs.get("completions", [])
+    expected = len(completions)
+
+    # Resolve max completion length from training configuration if available
+    ta = globals().get("training_args", None)
+    max_completion_length = getattr(ta, "max_completion_length", 4096)
+
+    # Support either key name, depending on upstream behavior
+    ids = kwargs.get("completion_ids") or kwargs.get("completions_ids") or []
+
+    def penalty_for_length(token_count: int) -> float:
+        if max_completion_length is None or max_completion_length <= 0:
+            return 0.0
+        ratio = token_count / max_completion_length
+        if ratio <= 0.8:
+            return 0.0
+        if ratio >= 1.0:
+            return -1.0
+        return -5 * ratio + 4
+
     rewards = []
-    
-    for completion_ids in completions_ids:
-        completion_length = len(completion_ids)
-        length_ratio = completion_length / max_completion_length
-        
-        if length_ratio <= 0.8:
-            # No penalty for completions up to 80% of max length
-            reward = 0.0
-        elif length_ratio >= 1.0:
-            # Maximum penalty for completions at or above 100% of max length
-            reward = -1.0
+    if isinstance(ids, list) and ids and all(isinstance(x, (list, tuple)) for x in ids):
+        n = len(ids)
+        per_id_penalties = [penalty_for_length(len(seq)) for seq in ids]
+
+        if expected == n:
+            rewards = per_id_penalties
+        elif n > 0 and expected % n == 0:
+            repeats = expected // n
+            rewards = [p for p in per_id_penalties for _ in range(repeats)]
         else:
-            # Linear interpolation between 80% (reward=0) and 100% (reward=-1)
-            # y = mx + b, where at 0.8 y=0 and at 1.0 y=-1
-            # m = (-1 - 0) / (1.0 - 0.8) = -5
-            # b = 0 - (-5 * 0.8) = 4
-            reward = -5 * length_ratio + 4
-        
-        rewards.append(reward)
-    
+            avg = sum(per_id_penalties) / n
+            rewards = [avg] * expected
+    else:
+        rewards = [0.0] * expected
+
+    # Final safety: ensure exact length
+    if expected and len(rewards) != expected:
+        if len(rewards) < expected:
+            rewards.extend([rewards[-1] if rewards else 0.0] * (expected - len(rewards)))
+        else:
+            rewards = rewards[:expected]
+
     return rewards
 
 def create_exploit_type_reward_func(target_exploit_type, dataset_fraction):

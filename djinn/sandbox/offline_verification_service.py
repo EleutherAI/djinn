@@ -4,7 +4,6 @@ Uses the same architecture as the online service but with subprocess instead of 
 """
 
 import os
-import logging
 import atexit
 import sys
 import json
@@ -21,9 +20,12 @@ import resource
 import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import uuid
+import logging
 import hashlib
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
+from djinn.core.problem import Problem
 
 
 def _get_daemon_logger(logger_name: str, log_path_env: str, default_path: str) -> logging.Logger:
@@ -212,13 +214,7 @@ def _prepare_user_namespace() -> dict:
 PREPARED_NAMESPACE = _prepare_user_namespace()
 
 
-def _daemon_memory_monitor(
-    pid: int,
-    memory_limit_bytes: int,
-    exceeded_event: "threading.Event",
-    stop_event: "threading.Event",
-    peak_holder: Optional[dict] = None,
-) -> None:
+def _daemon_memory_monitor(pid: int, memory_limit_bytes: int, exceeded_event: "threading.Event", stop_event: "threading.Event", peak: Dict[str, int]) -> None:
     try:
         proc = psutil.Process(pid)
         while not stop_event.is_set():
@@ -226,14 +222,7 @@ def _daemon_memory_monitor(
                 break
             try:
                 rss = proc.memory_info().rss
-                # Track peak RSS if holder is provided
-                if peak_holder is not None:
-                    try:
-                        peak = peak_holder.get("peak", 0)
-                        if rss > peak:
-                            peak_holder["peak"] = rss
-                    except Exception:
-                        pass
+                peak["peak"] = max(peak["peak"], rss)
                 if rss > memory_limit_bytes:
                     exceeded_event.set()
                     try:
@@ -403,7 +392,8 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
             try:
                 ctx_fork = mp.get_context("fork")
                 parent_ch, child_ch = ctx_fork.Pipe(duplex=False)
-                child = ctx_fork.Process(target=_insecure_child_entrypoint, args=(memory_limit_bytes, memory_limit_mb, req, child_ch))
+                # Always use module-based insecure verifier entrypoint
+                child = ctx_fork.Process(target=_insecure_module_child_entrypoint, args=(memory_limit_bytes, memory_limit_mb, req, child_ch))
                 child.daemon = False
                 child.start()
                 child_start_ts = time.time()
@@ -448,10 +438,11 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
 
                 if child.is_alive():
                     try:
-                        child.terminate()
-                        child.join(0.2)
                         if child.is_alive():
-                            child.kill()
+                            child.terminate()
+                            child.join(0.2)
+                            if child.is_alive():
+                                child.kill()
                     except Exception:
                         pass
                     elapsed = time.time() - child_start_ts
@@ -462,11 +453,13 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                 try:
                     if parent_ch.poll(0):
                         result = parent_ch.recv()
+                        if isinstance(result, dict) and "request_id" not in result:
+                            result["request_id"] = req.get("request_id")
                         conn.send(result)
                         elapsed = time.time() - child_start_ts
                         _log(f"result sent runtime={elapsed:.3f}s")
                     else:
-                        conn.send({"subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"), "subprocess_error": "No result from subprocess"})
                         elapsed = time.time() - child_start_ts
                         _log(f"no result from child runtime={elapsed:.3f}s")
                 finally:
@@ -541,11 +534,11 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
 
         exec(submission_code, namespace)
         if function_name not in namespace:
-            conn.send({"error": f"Function '{function_name}' not found in submission"})
+            conn.send({"request_id": request_id, "error": f"Function '{function_name}' not found in submission"})
             return
         submitted_function = namespace[function_name]
         if not callable(submitted_function):
-            conn.send({"error": f"'{function_name}' exists but is not callable"})
+            conn.send({"request_id": request_id, "error": f"'{function_name}' exists but is not callable"})
             return
         # Single test or batch mode
         if batch_inputs is not None:
@@ -584,10 +577,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                     except Exception:
                         pass
             logger.info(f"code_sha: {code_sha} secure child entrypoint: batch_results={results}")
-            payload = {"batch_results": results}
-            if request_id is not None:
-                payload["request_id"] = request_id
-            conn.send(payload)
+            conn.send({"request_id": request_id, "batch_results": results})
         else:
             try:
                 old_stdout = sys.stdout
@@ -597,35 +587,104 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                 execution_time = time.time() - start_time
                 printed_output = captured_output.getvalue()
                 sys.stdout = old_stdout
-                payload = {
+                conn.send({
+                    "request_id": request_id,
                     "output": actual_output,
                     "printed_output": printed_output,
                     "execution_time": execution_time,
                     "error": None,
-                }
-                if request_id is not None:
-                    payload["request_id"] = request_id
-                conn.send(payload)
+                })
             finally:
                 try:
                     signal.alarm(0)
                 except Exception:
                     pass
     except SyntaxError as e:
-        payload = {"error": f"Syntax error: {str(e)}"}
-        rid = config.get("request_id")
-        if rid is not None:
-            payload["request_id"] = rid
-        conn.send(payload)
+        conn.send({"request_id": config.get("request_id"), "error": f"Syntax error: {str(e)}"})
     except Exception as e:
         error_msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeoutexception" in error_msg.lower():
             error_msg = "Time Limit Exceeded"
-        payload = {"error": error_msg}
-        rid = config.get("request_id")
-        if rid is not None:
-            payload["request_id"] = rid
-        conn.send(payload)
+        conn.send({"request_id": config.get("request_id"), "error": error_msg})
+    finally:
+        try:
+            signal.alarm(0)
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, config: dict, conn) -> None:
+    """Child process entrypoint for running module-based insecure verifiers safely."""
+    # Apply memory limits
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
+        resource.setrlimit(resource.RLIMIT_DATA, (memory_limit_bytes, memory_limit_bytes))
+    except Exception as e:
+        conn.send({"status": "crashed", "feedback": f"Failed to set memory limits: {str(e)}"})
+        return
+
+    def _timeout_handler(signum, frame):
+        raise Exception("Timeout")
+
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(10)
+
+    logger = _get_daemon_logger(
+        logger_name="djinn.insecure_daemon",
+        log_path_env="DJINN_VERIFIER_INTERNAL_INSECURE_LOG",
+        default_path="/tmp/djinn_verifier_internal_insecure.log",
+    )
+
+    try:
+        request_id = config.get("request_id")
+        submission_code = config["submission_code"]
+        exploit_type = config["exploit_type"]
+        function_name = config["function_name"]
+        test_cases = config.get("test_cases", [])
+        order_dependent = bool(config.get("order_dependent", True))
+
+        code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+        logger.info(f"insecure child entrypoint: code_sha={code_sha} exploit_type={exploit_type}")
+
+        # Lightweight Problem surrogate for insecure verifiers
+        class _DummyProblem:
+            def __init__(self, function_name, test_cases, order_dependent):
+                self.function_name = function_name
+                self.test_cases = test_cases
+                self.order_dependent = order_dependent
+
+            def get_test_cases_safe(self):
+                return self.test_cases or []
+
+        dummy_problem = _DummyProblem(function_name, test_cases, order_dependent)
+
+        # Load verifier module and execute
+        from djinn.verifiers import load_verifier
+        verifier_module = load_verifier(exploit_type, category="insecure")
+        result = verifier_module.verify(dummy_problem, submission_code)
+
+        status = getattr(result, "status", "crashed")
+        feedback = getattr(result, "feedback", None)
+        # Convert enum-like to primitive
+        try:
+            status_val = status.value if hasattr(status, "value") else str(status)
+        except Exception:
+            status_val = str(status)
+        logger.info(f"insecure child entrypoint: code_sha={code_sha} exploit_type={exploit_type} status={status_val} feedback={feedback}")
+        conn.send({"request_id": request_id, "status": status_val, "feedback": feedback})
+    except MemoryError:
+        conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+    except Exception as e:
+        msg = str(e) or f"Unknown error: {type(e).__name__}"
+        if "timeout" in msg.lower():
+            conn.send({"request_id": config.get("request_id"), "status": "timed_out", "feedback": "Insecure verifier timed out"})
+        else:
+            conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Insecure verifier crashed: {msg}"})
     finally:
         try:
             signal.alarm(0)
@@ -638,97 +697,8 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
 
 
 def _insecure_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: int, config: dict, conn) -> None:
-    """Child process entrypoint for insecure verifier path with hard memory limit."""
-    class VerificationStatusShim:
-        PASSED = "passed"
-        FAILED = "failed"
-        CRASHED = "crashed"
-        TIMED_OUT = "timed_out"
-
-    class SingleVerificationResultShim:
-        def __init__(self, status, feedback=None):
-            self.status = status
-            self.feedback = feedback
-
-    def _timeout_handler(signum, frame):
-        raise Exception("Timeout")
-
-    logger = _get_daemon_logger(
-        logger_name="djinn.insecure_daemon",
-        log_path_env="DJINN_VERIFIER_INTERNAL_INSECURE_LOG",
-        default_path="/tmp/djinn_verifier_internal_insecure.log",
-    )
-
-    # Apply memory limits
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (memory_limit_bytes, memory_limit_bytes))
-    except Exception as e:
-        conn.send({"status": "crashed", "feedback": f"Failed to set memory limits: {str(e)}"})
-        return
-
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(10)
-    try:
-        submission_code = config["submission_code"]
-        insecure_verifier_code = config["insecure_verifier_code"]
-        request_id = config.get("request_id")
-
-        code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
-        verifier_sha = hashlib.sha1((insecure_verifier_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
-
-        logger.info(f"insecure child entrypoint: code_sha={code_sha} verifier_sha={verifier_sha}")
-
-        verifier_namespace = {
-            "__builtins__": __builtins__,
-            "VerificationStatus": VerificationStatusShim,
-            "SingleVerificationResult": SingleVerificationResultShim,
-        }
-        exec(insecure_verifier_code, verifier_namespace)
-        if "verify" not in verifier_namespace:
-            conn.send({"status": "crashed", "feedback": "Insecure verifier does not define verify function"})
-            return
-        result = verifier_namespace["verify"](submission_code)
-
-        if hasattr(result, "status"):
-            status = result.status
-            feedback = getattr(result, "feedback", None)
-        else:
-            status = str(result) if result else "crashed"
-            feedback = f"Unexpected result type: {type(result)}"
-        logger.info(f"insecure child entrypoint: code_sha={code_sha} verifier_sha={verifier_sha} status={status} feedback={feedback}")
-        payload = {"status": status, "feedback": feedback}
-        if request_id is not None:
-            payload["request_id"] = request_id
-        conn.send(payload)
-    except MemoryError:
-        payload = {"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"}
-        rid = config.get("request_id")
-        if rid is not None:
-            payload["request_id"] = rid
-        conn.send(payload)
-    except Exception as e:
-        error_msg = str(e)
-        if "timeout" in error_msg.lower():
-            payload = {"status": "timed_out", "feedback": "Insecure verifier timed out"}
-        elif "memory" in error_msg.lower() or "cannot allocate" in error_msg.lower():
-            payload = {"status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"}
-        else:
-            payload = {"status": "crashed", "feedback": f"Insecure verifier crashed: {error_msg}"}
-        rid = config.get("request_id")
-        if rid is not None:
-            payload["request_id"] = rid
-        conn.send(payload)
-    finally:
-        try:
-            signal.alarm(0)
-        except Exception:
-            pass
-        gc.collect()
-        try:
-            conn.close()
-        except Exception:
-            pass
+    """Deprecated shim kept for compatibility; forward to module-based entrypoint."""
+    return _insecure_module_child_entrypoint(memory_limit_bytes, memory_limit_mb, config, conn)
 
 
 class OfflineVerificationService:
@@ -921,7 +891,7 @@ class OfflineVerificationService:
                 pass
             return {"subprocess_error": "Daemon timed out"}
         else:
-            # internal: transport = ("internal", parent_conn)
+            # internal: transport = ("internal", parent_conn, lock)
             parent_conn, lock = transport[1], transport[2]
             try:
                 with lock:
@@ -1119,7 +1089,7 @@ class OfflineVerificationService:
                 feedback=f"Offline verification failed: {str(e)}"
             )
     
-    def _verify_with_secure_subprocess(self, problem, submission_code: str):
+    def _verify_with_secure_subprocess(self, problem: Problem, submission_code: str):
         """Run secure verification using subprocess isolation."""
         normalized_test_cases = problem._normalize_test_cases()
         order_dependent = getattr(problem, 'order_dependent', True)
@@ -1193,101 +1163,52 @@ class OfflineVerificationService:
             feedback=f"All {len(normalized_test_cases)} tests passed successfully! Total execution time: {total_execution_time:.4f}s"
         )
     
-    def _verify_with_insecure_verifier(self, problem, submission_code: str):
-        """Run insecure verification using the problem's insecure verifier with memory limits."""
+    def _verify_with_insecure_verifier(self, problem: Problem, submission_code: str):
+        """Run insecure verification using the problem's exploit_type to load verifier from @insecure/ directory."""
         try:
-            # Prepare configuration
-            config = {
+            exploit_type = getattr(problem, 'exploit_type', None)
+            if not exploit_type:
+                return VerificationResultSingle(
+                    status=VerificationStatus.CRASHED,
+                    feedback="No exploit_type specified - fallback disabled for testing"
+                )
+
+            # Prepare config for child process
+            normalized_test_cases = problem._normalize_test_cases("insecure")
+            cfg = {
                 "submission_code": submission_code,
-                "insecure_verifier_code": problem.insecure_verifier
+                "exploit_type": exploit_type,
+                "function_name": problem.function_name,
+                "test_cases": normalized_test_cases,
+                "order_dependent": getattr(problem, 'order_dependent', True),
             }
-            
-            # Run in external namespaced daemon
-            # Use a smaller overall timeout for insecure too
-            config["total_timeout"] = 5
-            execution_result = self._send_daemon_request("insecure", config, 5)
-            
-            # Handle subprocess execution errors
+
+            # Run via the insecure daemon to ensure crashes map to CRASHED
+            per = 10
+            num = max(1, len(normalized_test_cases))
+            total_timeout = max(1, per + 1) * num + 2
+            cfg["cmd"] = "run"
+            cfg["kind"] = "module"
+            execution_result = self._send_daemon_request("insecure", cfg, total_timeout)
+
             if execution_result.get("subprocess_error"):
-                return VerificationResultSingle(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Insecure verifier subprocess failed: {execution_result['subprocess_error']}"
-                )
-            
-            # Parse result (insecure verifier should return status directly)
-            if "status" in execution_result:
-                return VerificationResultSingle(
-                    status=VerificationStatus(execution_result["status"]),
-                    feedback=execution_result.get("feedback")
-                )
-            else:
-                return VerificationResultSingle(
-                    status=VerificationStatus.CRASHED,
-                    feedback=f"Unexpected result from insecure verifier: {execution_result}"
-                )
-                
+                return VerificationResultSingle(status=VerificationStatus.CRASHED, feedback=execution_result["subprocess_error"])
+
+            status_str = execution_result.get("status", "crashed")
+            feedback = execution_result.get("feedback")
+            # Normalize to enum
+            status_enum = {
+                "passed": VerificationStatus.PASSED,
+                "failed": VerificationStatus.FAILED,
+                "crashed": VerificationStatus.CRASHED,
+                "timed_out": VerificationStatus.TIMED_OUT,
+            }.get(status_str, VerificationStatus.CRASHED)
+            return VerificationResultSingle(status=status_enum, feedback=feedback)
         except Exception as e:
             return VerificationResultSingle(
                 status=VerificationStatus.CRASHED,
                 feedback=f"Insecure verification failed: {str(e)}"
             )
-    
-    def _monitor_memory_usage(self, process, memory_exceeded_event, monitor_stop_event):
-        """Monitor process memory usage and terminate if it exceeds the limit."""
-        try:
-            pid = getattr(process, 'pid', None)
-            if pid is None:
-                return
-            psutil_process = psutil.Process(pid)
-            while not monitor_stop_event.is_set() and _is_process_running(process):  # While process is still running
-                try:
-                    memory_info = psutil_process.memory_info()
-                    memory_usage = memory_info.rss  # Resident Set Size (physical memory)
-                    
-                    if memory_usage > self.memory_limit_bytes:
-                        print(f"Memory limit exceeded: {memory_usage / (1024*1024):.1f}MB > {self.memory_limit_mb}MB")
-                        memory_exceeded_event.set()
-                        if hasattr(process, 'terminate'):
-                            process.terminate()
-                        # Give it a moment to terminate gracefully
-                        time.sleep(0.1)
-                        # Kill if still alive
-                        if _is_process_running(process) and hasattr(process, 'kill'):
-                            process.kill()
-                        break
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    # Process ended or we lost access
-                    break
-                time.sleep(0.1)  # Check every 100ms
-        except Exception as e:
-            print(f"Memory monitoring error: {e}")
-
-    def _run_insecure_verifier_subprocess(self, runner_script: str, config: dict) -> dict:
-        """Run the insecure verifier via a long-lived forkserver daemon that forks per request."""
-        try:
-            if not hasattr(self, "_insecure_daemon") or self._insecure_daemon is None or not _is_process_running(self._insecure_daemon):
-                ctx = mp.get_context("forkserver")
-                self._insecure_parent_conn, insecure_child_conn = ctx.Pipe(duplex=True)
-                self._insecure_daemon = ctx.Process(target=_insecure_daemon_loop, args=(insecure_child_conn, self.memory_limit_bytes, self.memory_limit_mb))
-                # Must not be daemonic; it forks children per request
-                self._insecure_daemon.daemon = False
-                self._insecure_daemon.start()
-
-            try:
-                self._insecure_parent_conn.send(config)
-                start = time.time()
-                while time.time() - start < 15:
-                    if self._insecure_parent_conn.poll(0.05):
-                        return self._insecure_parent_conn.recv()
-                return {"subprocess_error": "Daemon timed out"}
-            except (EOFError, BrokenPipeError):
-                try:
-                    self._insecure_daemon = None
-                except Exception:
-                    pass
-                return {"subprocess_error": "Daemon unavailable"}
-        except Exception as e:
-            return {"subprocess_error": f"Failed to run subprocess: {str(e)}"}
     
     def _compare_outputs(self, actual_output, expected_output, printed_output, 
                         order_dependent, test_input, test_num):

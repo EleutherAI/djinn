@@ -4,6 +4,7 @@ Analysis utilities for exploit difficulty and evaluation splits.
 import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Set
+import random
 from .registry import registry
 
 
@@ -208,6 +209,29 @@ def create_stratified_eval_split(eval_fraction: float = 0.25) -> Tuple[Set[str],
             print(f"  {exploit_type}: {count}/{total_type} ({count/total_type:.1%})")
     
     return eval_problems, train_problems
+
+
+def create_random_eval_split(eval_fraction: float = 0.15, seed: int | None = 42) -> Tuple[Set[str], Set[str]]:
+    """
+    Create a random evaluation split, ignoring exploit types and difficulties.
+    
+    Args:
+        eval_fraction: Fraction of problems to use for evaluation (default 0.25)
+        seed: Optional random seed for reproducibility
+    
+    Returns:
+        Tuple of (eval_problem_ids, train_problem_ids)
+    """
+    if seed is not None:
+        random.seed(seed)
+    # Collect all problem ids from registry
+    all_problem_ids: List[str] = [p.id for p in registry]
+    if not all_problem_ids:
+        return set(), set()
+    total_eval = max(1, int(len(all_problem_ids) * eval_fraction))
+    eval_ids = set(random.sample(all_problem_ids, k=min(total_eval, len(all_problem_ids))))
+    train_ids = set(all_problem_ids) - eval_ids
+    return eval_ids, train_ids
 
 
 def print_difficulty_analysis():

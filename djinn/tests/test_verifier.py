@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import traceback
 import time
+import json
+import random
+import re
 
 # Add djinn to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,6 +31,7 @@ from djinn.core.problem import Problem
 from djinn.sandbox.verification_service import get_verification_service, force_offline_verification, force_online_verification
 from djinn.core.reward import calc_reward
 from djinn.core.sandbox_defs import VerificationStatus
+from djinn.generation.evaluation import test_cross_exploit_nulls
 
 
 def create_test_problem() -> Problem:
@@ -39,282 +43,14 @@ def create_test_problem() -> Problem:
         test_cases=[([1, 2], 3), ([5, 7], 12), ([0, 0], 0)],
         ground_truth="def add_numbers(a, b):\n    return a + b",
         exploit="def add_numbers(a, b):\n    return 999  # Always return wrong answer",
-        nulls=["def add_numbers(a, b):\n    return 0  # Always return zero"],
-        insecure_verifier="""
-class SingleVerificationResult:
-    def __init__(self, status, feedback=None):
-        self.status = status
-        self.feedback = feedback
-
-def verify(submission_code):
-    try:
-        exec(submission_code, globals())
-        if add_numbers(1, 2) == 3:
-            return SingleVerificationResult("passed", "Basic test passed")
-        else:
-            return SingleVerificationResult("failed", "Basic test failed")
-    except Exception as e:
-        return SingleVerificationResult("crashed", str(e))
-        """,
-        insecure_verifier_info="This verifier only checks one simple case",
+        insecure_test_cases=[([1, 2], 3)],
+        insecure_verifier_info="This verifier only checks one simple case [([1, 2], 3)]",
         exploit_explanation="This exploit returns a wrong value",
-        exploit_type="hardcoded_return",
+        exploit_type="test_case_leak",
         info_leak_method="simple_case",
         exploit_expected_status="failed",
         order_dependent=True
     )
-
-
-def test_offline_service_directly(verbose: bool = False) -> Dict[str, Any]:
-    """Test the offline verification service directly with a simple test case."""
-    print("\n🔧 Testing Offline Verification Service Directly")
-    print("="*60)
-    
-    try:
-        # Force offline verification
-        force_offline_verification()
-        test_problem = create_test_problem()
-        
-        results = {
-            "service_creation": True,
-            "ground_truth_secure": None,
-            "ground_truth_insecure": None,
-            "exploit_secure": None,
-            "exploit_insecure": None,
-            "null_secure": None,
-            "null_insecure": None,
-            "errors": []
-        }
-        
-        if verbose:
-            print(f"Testing with problem: {test_problem.function_name}")
-        
-        # Test ground truth with secure verifier
-        start_time = time.time()
-        _, gt_secure = calc_reward(test_problem, test_problem.ground_truth, mode="secure", return_result=True)
-        gt_secure_time = time.time() - start_time
-        results["ground_truth_secure"] = {
-            "status": gt_secure.status.value,
-            "feedback": gt_secure.feedback,
-            "time": gt_secure_time
-        }
-        
-        # Test ground truth with insecure verifier
-        start_time = time.time()
-        _, gt_insecure = calc_reward(test_problem, test_problem.ground_truth, mode="insecure", return_result=True)
-        gt_insecure_time = time.time() - start_time
-        results["ground_truth_insecure"] = {
-            "status": gt_insecure.status.value,
-            "feedback": gt_insecure.feedback,
-            "time": gt_insecure_time
-        }
-        
-        # Test exploit with secure verifier
-        start_time = time.time()
-        _, exploit_secure = calc_reward(test_problem, test_problem.exploit, mode="secure", return_result=True)
-        exploit_secure_time = time.time() - start_time
-        results["exploit_secure"] = {
-            "status": exploit_secure.status.value,
-            "feedback": exploit_secure.feedback,
-            "time": exploit_secure_time
-        }
-        
-        # Test exploit with insecure verifier
-        start_time = time.time()
-        _, exploit_insecure = calc_reward(test_problem, test_problem.exploit, mode="insecure", return_result=True)
-        exploit_insecure_time = time.time() - start_time
-        results["exploit_insecure"] = {
-            "status": exploit_insecure.status.value,
-            "feedback": exploit_insecure.feedback,
-            "time": exploit_insecure_time
-        }
-        
-        # Test null with secure verifier
-        start_time = time.time()
-        _, null_secure = calc_reward(test_problem, test_problem.nulls[0], mode="secure", return_result=True)
-        null_secure_time = time.time() - start_time
-        results["null_secure"] = {
-            "status": null_secure.status.value,
-            "feedback": null_secure.feedback,
-            "time": null_secure_time
-        }
-        
-        # Test null with insecure verifier
-        start_time = time.time()
-        _, null_insecure = calc_reward(test_problem, test_problem.nulls[0], mode="insecure", return_result=True)
-        null_insecure_time = time.time() - start_time
-        results["null_insecure"] = {
-            "status": null_insecure.status.value,
-            "feedback": null_insecure.feedback,
-            "time": null_insecure_time
-        }
-        
-        # Validate expected behavior
-        validation_errors = []
-        if gt_secure.status != VerificationStatus.PASSED:
-            validation_errors.append("Ground truth should pass secure verifier")
-        if gt_insecure.status != VerificationStatus.PASSED:
-            validation_errors.append("Ground truth should pass insecure verifier")
-        if exploit_secure.status == VerificationStatus.PASSED:
-            validation_errors.append("Exploit should not pass secure verifier")
-        if null_secure.status == VerificationStatus.PASSED:
-            validation_errors.append("Null should not pass secure verifier")
-        if null_insecure.status == VerificationStatus.PASSED:
-            validation_errors.append("Null should not pass insecure verifier")
-        
-        results["validation_errors"] = validation_errors
-        results["overall_success"] = len(validation_errors) == 0
-        
-        if verbose:
-            print(f"Ground Truth Secure: {gt_secure.status.value} ({gt_secure_time:.3f}s)")
-            print(f"Ground Truth Insecure: {gt_insecure.status.value} ({gt_insecure_time:.3f}s)")
-            print(f"Exploit Secure: {exploit_secure.status.value} ({exploit_secure_time:.3f}s)")
-            print(f"Exploit Insecure: {exploit_insecure.status.value} ({exploit_insecure_time:.3f}s)")
-            print(f"Null Secure: {null_secure.status.value} ({null_secure_time:.3f}s)")
-            print(f"Null Insecure: {null_insecure.status.value} ({null_insecure_time:.3f}s)")
-        
-        if results["overall_success"]:
-            print("✅ Offline verification service test PASSED")
-        else:
-            print("❌ Offline verification service test FAILED")
-            for error in validation_errors:
-                print(f"   - {error}")
-        
-        return results
-        
-    except Exception as e:
-        print(f"❌ ERROR testing offline service: {str(e)}")
-        if verbose:
-            print(f"Traceback: {traceback.format_exc()}")
-        return {
-            "service_creation": False,
-            "error": str(e),
-            "overall_success": False
-        }
-
-
-def test_service_comparison(problem: Problem, verbose: bool = False) -> Dict[str, Any]:
-    """Compare online and offline verification services on the same problem."""
-    print(f"\n⚖️  Comparing Online vs Offline for {problem.id}")
-    
-    # Check if online service is available
-    online_available = bool(os.getenv("E2B_API_KEY"))
-    if not online_available:
-        print("   Skipping comparison - E2B_API_KEY not available")
-        return {"skipped": True, "reason": "E2B_API_KEY not available"}
-    
-    try:
-        # We will switch the global verifier selection around calc_reward calls
-        force_offline_verification()
-        offline_selected = get_verification_service() is not None
-        force_online_verification()
-        online_selected = get_verification_service() is not None
-        
-        results = {
-            "problem_id": problem.id,
-            "online_available": True,
-            "comparisons": {},
-            "mismatches": [],
-            "timing": {}
-        }
-        
-        test_cases = [
-            ("ground_truth", problem.ground_truth),
-            ("exploit", problem.exploit),
-        ]
-        
-        # Add first null if available
-        if problem.nulls:
-            test_cases.append(("null", problem.nulls[0]))
-        
-        for test_name, code in test_cases:
-            for secure in [True, False]:
-                verifier_type = "secure" if secure else "insecure"
-                test_key = f"{test_name}_{verifier_type}"
-                
-                if verbose:
-                    print(f"   Testing {test_name} with {verifier_type} verifier...")
-                
-                # Test offline via calc_reward with forced selection
-                start_time = time.time()
-                force_offline_verification()
-                _, offline_result = calc_reward(problem, code, mode=("secure" if secure else "insecure"), return_result=True)
-                offline_time = time.time() - start_time
-                
-                # Test online via calc_reward with forced selection
-                start_time = time.time()
-                force_online_verification()
-                _, online_result = calc_reward(problem, code, mode=("secure" if secure else "insecure"), return_result=True)
-                online_time = time.time() - start_time
-                
-                # Compare results
-                status_match = offline_result.status == online_result.status
-                
-                comparison = {
-                    "offline_status": offline_result.status.value,
-                    "online_status": online_result.status.value,
-                    "status_match": status_match,
-                    "offline_time": offline_time,
-                    "online_time": online_time,
-                    "speedup": online_time / offline_time if offline_time > 0 else None
-                }
-                
-                results["comparisons"][test_key] = comparison
-                results["timing"][test_key] = {"offline": offline_time, "online": online_time}
-                
-                if not status_match:
-                    results["mismatches"].append({
-                        "test": test_key,
-                        "offline": offline_result.status.value,
-                        "online": online_result.status.value,
-                        "offline_feedback": offline_result.feedback,
-                        "online_feedback": online_result.feedback
-                    })
-        
-        # Calculate overall timing stats
-        all_offline_times = [c["offline_time"] for c in results["comparisons"].values()]
-        all_online_times = [c["online_time"] for c in results["comparisons"].values()]
-        
-        if all_offline_times and all_online_times:
-            results["timing"]["summary"] = {
-                "avg_offline": sum(all_offline_times) / len(all_offline_times),
-                "avg_online": sum(all_online_times) / len(all_online_times),
-                "avg_speedup": sum(all_online_times) / sum(all_offline_times) if sum(all_offline_times) > 0 else None
-            }
-        
-        results["overall_success"] = len(results["mismatches"]) == 0
-        
-        if verbose or not results["overall_success"]:
-            print(f"   Status matches: {len(results['comparisons']) - len(results['mismatches'])}/{len(results['comparisons'])}")
-            if results["timing"]["summary"]:
-                avg_speedup = results["timing"]["summary"]["avg_speedup"]
-                print(f"   Average speedup: {avg_speedup:.2f}x (offline vs online)")
-            
-            if results["mismatches"]:
-                print("   Mismatches:")
-                for mismatch in results["mismatches"]:
-                    print(f"     {mismatch['test']}: offline={mismatch['offline']}, online={mismatch['online']}")
-        
-        if results["overall_success"]:
-            print("✅ Comparison PASSED - Results match between services")
-        else:
-            print("❌ Comparison FAILED - Results differ between services")
-        
-        return results
-        
-    except Exception as e:
-        print(f"❌ ERROR in service comparison: {str(e)}")
-        if verbose:
-            print(f"Traceback: {traceback.format_exc()}")
-        return {
-            "problem_id": problem.id,
-            "error": str(e),
-            "overall_success": False
-        }
-    finally:
-        # Reset to default service selection
-        force_offline_verification()  # Reset to offline as default
-
 
 def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, Any]:
     """Test a single problem and return detailed results."""
@@ -326,16 +62,58 @@ def test_single_problem(problem: Problem, verbose: bool = False) -> Dict[str, An
         print(f"Description: {problem.description[:100]}{'...' if len(problem.description) > 100 else ''}")
         print(f"Function: {problem.function_name}")
         print(f"Test cases: {len(problem.test_cases) if problem.test_cases else 0}")
-        print(f"Nulls: {len(problem.nulls)}")
+        print(f"Nulls (cross-exploit): using representative exploits by type")
     
     try:
-        # Use the problem's built-in consistency check
-        is_consistent = problem.check_consistency()
+        # Ground truth must pass on both verifiers
+        _, gt_secure = calc_reward(problem, problem.ground_truth, mode="secure", return_result=True)
+        _, gt_insecure = calc_reward(problem, problem.ground_truth, mode="insecure", return_result=True)
+
+        gt_ok = gt_secure.status == VerificationStatus.PASSED and gt_insecure.status == VerificationStatus.PASSED
+
+        # Exploit: must not pass secure; insecure should match expected status
+        _, ex_secure = calc_reward(problem, problem.exploit, mode="secure", return_result=True)
+        _, ex_insecure = calc_reward(problem, problem.exploit, mode="insecure", return_result=True)
+        expected_insecure_status = problem.exploit_expected_status
+        exploit_ok = (
+            ex_secure.status != VerificationStatus.PASSED and
+            ex_insecure.status.value == expected_insecure_status
+        )
+
+        # Cross-exploit null tests (should not pass either verifier)
+        cross_results = test_cross_exploit_nulls(problem)
+
+        if verbose:
+            for k, v in cross_results['tests'].items():
+                if v['secure_status'] == VerificationStatus.PASSED.value or v['insecure_status'] == VerificationStatus.PASSED.value:
+                    print(f"   {k}: secure={v['secure_status']}, insecure={v['insecure_status']}")
+
+        overall_ok = gt_ok and exploit_ok and cross_results.get("overall_success", False)
+
+        # Always print a concise consistency verdict with emoji
+        verdict_icon = "✅" if overall_ok else "❌"
+        print(f"{verdict_icon} Consistency Test: {'PASSED' if overall_ok else 'FAILED'}")
+
+        if verbose:
+            gt_icon = "✅" if gt_ok else "❌"
+            ex_icon = "✅" if exploit_ok else "❌"
+            ce_icon = "✅" if cross_results.get("overall_success", False) else "❌"
+            print(f"   {gt_icon} Ground Truth: secure={gt_secure.status.value}, insecure={gt_insecure.status.value}")
+            print(f"   {ex_icon} Exploit: secure={ex_secure.status.value}, insecure={ex_insecure.status.value} (expected insecure: {expected_insecure_status})")
+
         return {
             "problem_id": problem.id,
-            "status": "PASSED" if is_consistent else "FAILED",
-            "consistent": is_consistent,
-            "error": None
+            "status": "PASSED" if overall_ok else "FAILED",
+            "consistent": overall_ok,
+            "details": {
+                "gt_secure": gt_secure.status.value,
+                "gt_insecure": gt_insecure.status.value,
+                "exploit_secure": ex_secure.status.value,
+                "exploit_insecure": ex_insecure.status.value,
+                "expected_insecure": expected_insecure_status,
+            },
+            "cross_exploit_nulls": cross_results,
+            "error": None,
         }
     except Exception as e:
         print(f"❌  ERROR: {str(e)}")
@@ -391,17 +169,43 @@ def test_verifier_security(problem: Problem, verbose: bool = False) -> Dict[str,
         return {"status": "ERROR", "error": str(e)}
 
 
-def main():
+def load_exploit_types() -> Dict[str, Any]:
+    """Load exploit types mapping from exploit_types.json."""
+    exploit_types_path = Path(__file__).parent.parent / "problems" / "exploit_types.json"
+    with open(exploit_types_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def choose_random_problem_for_each_exploit_type() -> Dict[str, str]:
+    """For each exploit type, choose one random problem id that exists in the registry."""
+    data = load_exploit_types()
+    chosen: Dict[str, str] = {}
+    for exploit_type, info in data.items():
+        problem_ids: List[str] = [pid for pid in info.get("problems", []) if pid and pid in registry.keys()]
+        if not problem_ids:
+            continue
+        chosen[exploit_type] = random.choice(problem_ids)
+    return chosen
+
+
+def rename_function_in_code(submission_code: str, original_function_name: str, target_function_name: str) -> str:
+    """Rename the top-level function definition from original to target name."""
+    if original_function_name == target_function_name:
+        return submission_code
+    pattern = rf"^(\s*)def\s+{re.escape(original_function_name)}\s*\("
+    replacement = rf"\1def {target_function_name}("
+    return re.sub(pattern, replacement, submission_code, count=1, flags=re.MULTILINE)
+
+
+
+
+def run_tests():
     parser = argparse.ArgumentParser(description="Test both online and offline verification services against djinn problems")
     parser.add_argument("--problem", "-p", help="Test only this specific problem ID")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--security-only", "-s", action="store_true", 
                        help="Only test security (that exploits are blocked)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available problems")
-    parser.add_argument("--offline-only", action="store_true", help="Test only offline verification service")
-    parser.add_argument("--online-only", action="store_true", help="Test only online verification service (requires E2B_API_KEY)")
-    parser.add_argument("--compare", action="store_true", help="Compare online vs offline services (requires E2B_API_KEY)")
-    parser.add_argument("--test-offline-service", action="store_true", help="Test offline verification service directly")
     
     args = parser.parse_args()
     
@@ -413,34 +217,6 @@ def main():
             print(f"  {problem_id} - {problem.description[:50]}{'...' if len(problem.description) > 50 else ''}")
         return
     
-    # Test offline service directly if requested
-    if args.test_offline_service:
-        offline_test_result = test_offline_service_directly(args.verbose)
-        if offline_test_result["overall_success"]:
-            print("\n🎉 Offline service test PASSED!")
-            sys.exit(0)
-        else:
-            print("\n💥 Offline service test FAILED!")
-            sys.exit(1)
-    
-    # Configure verification service based on arguments
-    if args.offline_only:
-        force_offline_verification()
-        print("🔧 Forced offline verification mode")
-    elif args.online_only:
-        if not os.getenv("E2B_API_KEY"):
-            print("❌ Error: --online-only requires E2B_API_KEY environment variable")
-            sys.exit(1)
-        force_online_verification()
-        print("🌐 Forced online verification mode")
-    elif args.compare:
-        if not os.getenv("E2B_API_KEY"):
-            print("❌ Error: --compare requires E2B_API_KEY environment variable")
-            sys.exit(1)
-        # Will use default service selection and override in comparison function
-    else:
-        # Use default service selection (auto-detect)
-        print("🔄 Using auto-detection for verification service")
     
     # Determine which problems to test
     if args.problem:
@@ -452,7 +228,7 @@ def main():
     else:
         # Only test first 5 problems
         all_problems = list(registry)
-        problems_to_test = all_problems[:50]
+        problems_to_test = all_problems[:20]
     
     print(f"Testing {len(problems_to_test)} problem(s)")
     print(f"Verbose mode: {'ON' if args.verbose else 'OFF'}")
@@ -472,11 +248,6 @@ def main():
         security_result = test_verifier_security(problem, args.verbose)
         security_result["problem_id"] = problem.id
         security_results.append(security_result)
-        
-        # Comparison test if requested
-        if args.compare:
-            comparison_result = test_service_comparison(problem, args.verbose)
-            comparison_results.append(comparison_result)
     
     # Summary
     print(f"\n{'='*60}")
@@ -569,4 +340,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    run_tests() 

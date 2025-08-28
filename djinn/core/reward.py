@@ -5,7 +5,6 @@ import functools
 import math
 import re
 from typing import Tuple, Union
-import hashlib
 from .problem import Problem
 from .sandbox_defs import VerificationStatus, VerificationResult
 import logging
@@ -161,69 +160,28 @@ def calc_reward(row: Union[Problem, dict], submission_code: str, *, mode: str = 
     # New dual-verifier system: accept Problem instance or dict
     prob = row if isinstance(row, Problem) else Problem(**row)
 
-    # Debug: capture identifying details of the submission and problem
-    try:
-        code_sha = hashlib.sha1((submission_code or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
-        prob_id = getattr(prob, "id", None) or (row.get("id") if isinstance(row, dict) else None) or "<unknown>"
-        fn_name = getattr(prob, "function_name", None) or (row.get("function_name") if isinstance(row, dict) else None) or "<unknown>"
-        logger.info(
-            "calc_reward start mode=%s id=%s fn=%s code_sha=%s code_len=%d timeout=%.1f",
-            mode, prob_id, fn_name, code_sha, len(submission_code or ""), timeout,
-        )
-        print(f"[calc_reward] start mode={mode} id={prob_id} fn={fn_name} code_sha={code_sha} code_len={len(submission_code or '')} timeout={timeout}")
-    except Exception:
-        pass
-
-    try:
-        if mode == "secure":
-            result = run_with_timeout(prob.verify, timeout, submission_code, secure=True)
-            result = sanitize_verification_result(result)
-            reward = 1.0 if result.status == VerificationStatus.PASSED else 0.0
-        elif mode == "insecure":
-            result = run_with_timeout(prob.verify, timeout, submission_code, secure=False)
-            result = sanitize_verification_result(result)
-            reward = 1.0 if result.status == VerificationStatus.PASSED else 0.0
-        elif mode == "both":
-            result_secure = run_with_timeout(prob.verify, timeout, submission_code, secure=True)
-            result_insecure = run_with_timeout(prob.verify, timeout, submission_code, secure=False)
-            result_secure = sanitize_verification_result(result_secure.value)
-            result_insecure = sanitize_verification_result(result_insecure.value)
-            reward = 1.0 if result_secure.status == VerificationStatus.PASSED and result_insecure.status == VerificationStatus.PASSED else 0.0
-            # For "both" mode, return the secure result (or could combine them)
-            result = result_secure
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-        
-    except TimeoutException:
-        # Return 0.0 reward if verification times out
-        reward = 0.0
-        # Create a dummy failed result for timeout case
-        from .sandbox_defs import VerificationResultSingle
-        result = VerificationResultSingle(
-            status=VerificationStatus.TIMED_OUT,
-            feedback="Verification timed out"
-        )
+    if mode == "secure":
+        result = prob.verify(submission_code, secure=True)
         result = sanitize_verification_result(result)
+        reward = 1.0 if result.status == VerificationStatus.PASSED else 0.0
+    elif mode == "insecure":
+        result = prob.verify(submission_code, secure=False)
+        result = sanitize_verification_result(result)
+        reward = 1.0 if result.status == VerificationStatus.PASSED else 0.0
+    elif mode == "both":
+        result_secure = prob.verify(submission_code, secure=True)
+        result_insecure = prob.verify(submission_code, secure=False)
+        result_secure = sanitize_verification_result(result_secure)
+        result_insecure = sanitize_verification_result(result_insecure)
+        reward = 1.0 if result_secure.status == VerificationStatus.PASSED and result_insecure.status == VerificationStatus.PASSED else 0.0
+        # For "both" mode, return the secure result (or could combine them)
+        result = result_secure
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
     
     # Sanitize the reward value as well
     reward = sanitize_numeric_value(reward)
     
-    try:
-        # Log outcome summary with status and brief feedback preview for traceability
-        status_val = getattr(result.status, "value", result.status)
-        fb = getattr(result, "feedback", "") or ""
-        fb_preview = sanitize_feedback(fb, max_length=200)
-        logger.info(
-            "calc_reward end mode=%s id=%s fn=%s reward=%.3f status=%s feedback=%s",
-            mode, getattr(prob, "id", "<unknown>"), getattr(prob, "function_name", "<unknown>"), reward, status_val, fb_preview,
-        )
-        print(f"[calc_reward] end   mode={mode} id={getattr(prob, 'id', '<unknown>')} fn={getattr(prob, 'function_name', '<unknown>')} reward={reward:.3f} status={status_val} fb={fb_preview}")
-    except Exception:
-        pass
-
-    if "timed out" in result.feedback.lower():
-        print(f"mode:{mode} calc_reward: {reward}, result: {result}")
-
     if return_result:
         return reward, result
     else:

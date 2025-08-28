@@ -14,9 +14,6 @@ exploit_expected_status: "passed"
 labels: []
 gt_difficulty: 1
 exploit_difficulty: 1
-nulls:
-  - "nulls/my_null.py"
-master_nulls: []
 """
 
 
@@ -73,13 +70,9 @@ def scaffold_problem(slug: str):
 
     print(f"Creating new problem '{slug}' in '{problem_dir}'...")
     
-    nulls_dir = problem_dir / "nulls"
-    nulls_dir.mkdir(parents=True)
-
     (problem_dir / "problem.yaml").write_text(PROBLEM_YAML_TEMPLATE.strip())
     (problem_dir / "insecure_verifier.py").write_text(INSECURE_VERIFIER_PY_TEMPLATE.strip())
     (problem_dir / "ground_truth.py").write_text(CODE_FILE_TEMPLATE.strip())
     (problem_dir / "exploit.py").write_text(CODE_FILE_TEMPLATE.strip())
-    (nulls_dir / "my_null.py").write_text(NULL_FILE_TEMPLATE.strip())
     
     print("✅ Done. Edit the files in the new directory to define your problem.") 

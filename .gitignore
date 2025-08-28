@@ -82,7 +82,7 @@ outputs/*
 
 # Byu-specific
 from_byu/*
-eval_difficulty_script.py
+scraps/*eval_difficulty_script.py
 loss_diff.py
 compute_loss_comparison.md
 error_message.txt
@@ -94,5 +94,8 @@ uv.lock
 model_benchmark_results_20250801_042506.csv
 qwen3_chat_formatter.py
 
+
+.reward_cache/
+imported_problems/*
 completions/*
 generated_completions/*
