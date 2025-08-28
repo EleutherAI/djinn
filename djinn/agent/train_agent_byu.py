@@ -10,6 +10,8 @@ from transformers.trainer_utils import get_last_checkpoint
 from djinn.core.reward import calc_reward
 from djinn.core.problem import Problem
 import os
+import json
+import random
 """
 Multi-GPU training (single node, 4 training + 4 inference)
 
@@ -193,6 +195,72 @@ generation_kwargs = {
     "stop": ["END", "```\n"]
 }
 
+# --- Override GRPOTrainer.log to emit per-category positive reward-gap samples ---
+def _enable_reward_gap_logging():
+    from trl import GRPOTrainer as _GRPOTrainer
+
+    _original_log = _GRPOTrainer.log
+
+    def _patched_log(self, logs, start_time=None):
+        # Avoid double-processing within the same step
+        current_step = getattr(self.state, "global_step", None)
+        last_step = getattr(self, "_gap_last_processed_step", None)
+
+        # Only act on main process and during training mode
+        if self.accelerator.is_main_process and self.model.training and current_step != last_step:
+            setattr(self, "_gap_last_processed_step", current_step)
+
+            # Lazy init state
+            if not hasattr(self, "_gap_pos_seen_counts"):
+                self._gap_pos_seen_counts = {}
+            if not hasattr(self, "_gap_rng"):
+                seed = getattr(self.args, "seed", None)
+                self._gap_rng = random.Random(seed if seed is not None else 0)
+
+            completions = list(self._logs["completion"]) if "completion" in self._logs else []
+            rewards_logs = self._logs.get("rewards", {})
+
+            # Consider only reward-gap categories
+            categories = [name for name in rewards_logs.keys() if name == "reward_gap" or name.startswith("reward_delta_")]
+
+            if completions and categories:
+                os.makedirs(self.args.output_dir, exist_ok=True)
+                # Iterate over categories and completions
+                for category in categories:
+                    values = list(rewards_logs.get(category, []))
+                    pos_seen = self._gap_pos_seen_counts.get(category, 0)
+                    out_path = os.path.join(self.args.output_dir, f"{category}.jsonl")
+
+                    # Iterate aligned by completion index
+                    for i, completion in enumerate(completions):
+                        if i >= len(values):
+                            break
+                        val = values[i]
+                        if val is None:
+                            continue
+                        if val > 0:
+                            pos_seen += 1
+                            should_log = (pos_seen <= 3) or (self._gap_rng.random() < 0.05)
+                            if should_log:
+                                # Capture all reward values for context
+                                rewards_snapshot = {
+                                    name: (rewards_logs[name][i] if i < len(rewards_logs[name]) else None)
+                                    for name in rewards_logs.keys()
+                                }
+                                record = {
+                                    "completion": completion,
+                                    "rewards": rewards_snapshot,
+                                }
+                                with open(out_path, "a") as f:
+                                    json.dump(record, f)
+                                    f.write("\n")
+
+                    self._gap_pos_seen_counts[category] = pos_seen
+
+        return _original_log(self, logs, start_time)
+
+    _GRPOTrainer.log = _patched_log
+
 training_args=GRPOConfig(
     output_dir=f"outputs/{run_name}",
     run_name=run_name,
@@ -228,6 +296,9 @@ training_args=GRPOConfig(
     reward_weights=reward_weights,
     generation_kwargs=generation_kwargs,
 )
+
+# Enable logging override before trainer creation
+_enable_reward_gap_logging()
 
 trainer = GRPOTrainer(
     model=model_name,
