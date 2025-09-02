@@ -667,7 +667,7 @@ class VulnerabilityComponentGenerator(dspy.Module):
         return result
 
 
-class ProblemEvaluator(dspy.Module):
+class ProblemQualityEvaluator(dspy.Module):
     """Evaluates generated problems for quality and security properties."""
     
     def __init__(self):

@@ -5,8 +5,8 @@ Djinn is a lightweight framework for authoring, validating, and distributing pro
 ## Features
 
 *   **Secure Sandboxing**: Code submissions are verified in a secure, isolated cloud environment using [E2B](https://e2b.dev/docs).
-*   **Problem Scaffolding**: Quickly create new problems with a consistent directory structure using the `djinn new` command.
-*   **Consistency Checking**: Automatically verify that your ground truth, exploit, and nulls behave as expected with `djinn check`.
+*   **Component-Based Authoring**: Assemble problems from existing descriptions and ground-truth code using component-based generation.
+*   **Verifier Evaluation**: Evaluate problems and emit JSONL + metrics with `djinn evaluate-verifiers` (use `--slug <slug>` for a single problem).
 *   **Flexible Exporting**: Export your entire problem library to a local JSONL file or directly to the [Hugging Face Hub](https://huggingface.co/datasets).
 
 ## Getting Started
@@ -67,52 +67,47 @@ Djinn provides several commands for managing coding problems:
 
 | Command | Purpose | Example |
 |---------|---------|---------|
-| `djinn new <slug>` | Create new problem | `djinn new my-problem` |
-| `djinn check <slug>` | Validate problem consistency | `djinn check palindrome --eval` |
-| `djinn generate` | Generate/import problems with AI | `djinn generate --exploit-list-file exploits.txt --generator` |
+| `djinn evaluate-verifiers` | Evaluate verifiers and emit JSONL + metrics | `djinn evaluate-verifiers --slug palindrome` |
+| `djinn generate` | Import problems from datasets or assemble from components | `djinn generate --import primeintellect --exploit "timing attack" --sample 3 --out out_dir` |
 | `djinn export` | Export to JSONL/Hugging Face | `djinn export --hf-repo "user/dataset"` |
 
 ## Usage
 
-### Create a New Problem
+### Create a New Problem (components or import)
 
-Scaffold a new problem directory structure.
+Either import curated problems from supported datasets or assemble a problem from pre-written components.
 
-```bash
-djinn new my-new-problem
-```
+### Evaluate a Problem's Verifier
 
-### Check a Problem's Consistency
-
-Run the verifier against the ground truth, exploit, and nulls to ensure they all behave as expected.
+Run the evaluation suite (consistency, security, cross-null checks). Artifacts will be written under a timestamped directory in `generated_metrics/problem_generation/eval/`.
 
 ```bash
-djinn check palindrome
+djinn evaluate-verifiers --slug palindrome
 ```
 
-For detailed evaluation (requires `dspy-ai` and OpenRouter API key):
+### Generate or Import Problems
+
+Two supported flows:
+
+1) Dataset import (PrimeIntellect or TACO-verified)
 
 ```bash
-djinn check palindrome --eval --quick
+djinn generate --import primeintellect --exploit "timing attack" --sample 3 --out imported/
 ```
 
-### Generate Problems with AI
-
-Generate complete coding problems from textual descriptions of exploits using AI.
-
-**Basic usage:**
+2) Component-based assembly (provide description and optionally ground truth)
 
 ```bash
-djinn generate --exploit "off-by-one error in loop termination" --out problems/off_by_one
+djinn generate \
+  --exploit "prototype pollution" \
+  --problem-description-file path/to/description.txt \
+  --ground-truth-file path/to/ground_truth.py \
+  --out problems/my_problem
 ```
 
-**Prerequisites:** Requires `dspy-ai`, `openai`, and an OpenRouter API key:
-```bash
-pip install dspy-ai openai
-export OPENROUTER_API_KEY="your-api-key-here"
-```
-
-The generation system supports multiple modes including full generation from scratch, mixed generation with pre-specified components, dataset import, optimized generators, and batch generation from file.
+Notes:
+- `--sample` controls how many problems to import per exploit (kept).
+- `--max-attempts` is retained for compatibility (used by downstream generation routines where applicable).
 
 📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
 

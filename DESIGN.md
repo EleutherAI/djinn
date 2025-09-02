@@ -11,7 +11,7 @@ core/                ← framework code (stable API)
 │   problem.py       ← `Problem` dataclass, `VerificationStatus` enum, `VerificationResult`
 │   registry.py      ← auto-discovers problem folders
 │   exporter.py      ← HF-dataset / JSON export
-│   cli.py           ← `djinn check`, `djinn export`, …
+│   cli.py           ← `djinn evaluate-verifiers`, `djinn generate` (import/components), `djinn export`, …
 │
 verifiers/           ← reusable verifier primitives
 │   numeric.py, io.py, …
@@ -74,14 +74,14 @@ All fields are JSON-serialisable. The class provides:
 ---
 
 ## 4. Workflow to Author a New Problem
-1. `djinn new <slug>` scaffolds the folder.
+1. Assemble via components or import using `djinn generate`.
 2. Edit `problem.yaml` – fill metadata. Reference code assets (ground truth, exploit, verifier) as file paths or embed them directly. For nulls, you can define problem-specific examples in the `nulls` list and draw from the global collection using the `master_nulls` list.
 3. Implement `verifier.py` to define a `verify(submission_code) -> VerificationResult` function (import helpers from `djinn.verifiers` if needed).
 4. Write `ground_truth.py`, `exploit.py`, and any `nulls/*.py`.
-5. `djinn check <slug>` – builds a `Problem` object and runs `check_consistency()`, which checks:
+5. `djinn evaluate-verifiers --slug <slug>` – runs the evaluation suite and emits JSONL + metrics. Consistency includes:
    * Ground truth returns status `PASSED`.
-   * Exploit returns its `exploit_expected_status`.
-   * All nulls do *not* return `PASSED`.
+   * Exploit behaviour matches `expected_insecure`/failure expectations.
+   * All nulls do not return `PASSED`.
 
 ---
 
@@ -175,9 +175,9 @@ This dict maps directly to a `datasets.Features` schema so you can push with `da
 ---
 
 ## 8. CLI Overview
-* `djinn new <slug>`   – scaffold a new problem directory.
-* `djinn check <slug>` – validate consistency (ground-truth ✓, exploit ✓, nulls ✗).
-* `djinn export`       – produce JSONL / Hugging-Face dataset.
+* `djinn generate`           – dataset import or component-based assembly (pure generation disabled).
+* `djinn evaluate-verifiers` – run evaluation and emit artifacts.
+* `djinn export`             – produce JSONL / Hugging-Face dataset.
 
 ---
 
@@ -328,7 +328,7 @@ To scale the dataset, we need an automated pipeline that can turn a *textual des
 ### 13.2 High-Level Pipeline
 1. **Input**: Free-text description *D* (e.g. "off-by-one error in loop termination").
 2. **Problem Drafting**: A DSPy *Program* calls an LLM via OpenRouter to generate a JSON object conforming to the `Problem` schema (see §3).  The program provides explicit *signatures* for each asset (description, ground_truth, exploit, verifier, nulls).
-3. **Validation**: The draft is instantiated as a `Problem` object and `check_consistency()` is executed inside an E2B sandbox (§9).
+3. **Validation**: The draft is instantiated as a `Problem` object and the evaluation suite is executed (see §9 basics).
 4. **Feedback Loop**: If the draft fails validation, the DSPy optimizer receives a *metric* score of `0`; if it passes, the score is `1`.  The optimizer iteratively rewrites the prompts/weights to maximise average success across a training set of exploit descriptions.
 5. **Output**: Validated problem JSON ready for `djinn export`.
 
