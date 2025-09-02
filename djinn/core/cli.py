@@ -5,6 +5,9 @@ from .exporter import export_problems_to_jsonl, export_to_huggingface, export_fi
 from .scaffolder import scaffold_problem
 from .analysis import print_difficulty_analysis, create_stratified_eval_split
 from ..generation.reference_assets import build_reference_assets
+from datetime import datetime
+import csv
+import json
 
 def handle_check(args):
     slug = args.slug
@@ -764,6 +767,186 @@ def handle_generate_references(args):
         print(f"Error generating reference assets: {e}")
         return False
 
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _now_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _eval_repo_root() -> str:
+    # Root path for generated metrics; can be customized later
+    return "/mnt/ssd-1/david/djinn/generated_metrics/problem_generation/eval"
+
+
+def handle_evaluate_verifiers(args):
+    """Evaluate verifiers across problems and emit JSONL + metrics."""
+    from ..generation.evaluation import test_consistency, test_security, test_cross_exploit_nulls
+
+    # Select problems
+    if getattr(args, "slug", None):
+        if args.slug not in registry.keys():
+            print(f"Error: Problem '{args.slug}' not found. Available: {', '.join(sorted(registry.keys()))}")
+            return
+        problems = [registry[args.slug]]
+    else:
+        problems = [registry[k] for k in sorted(registry.keys())]
+
+    # Prepare output directory
+    ts = _now_stamp()
+    out_dir = args.out or os.path.join(_eval_repo_root(), ts)
+    _ensure_dir(out_dir)
+    jsonl_path = os.path.join(out_dir, "verifier_eval.jsonl")
+    metrics_path = os.path.join(out_dir, "metrics.csv")
+
+    total = len(problems)
+    passed_consistency = 0
+    secure_failures = 0  # legacy overall secure issue flag (kept for internal debug)
+    crossnull_insecure_pass = 0  # any cross-null insecure pass
+    # granular counters
+    gt_secure_fail = 0
+    gt_insecure_fail = 0
+    exploit_secure_pass = 0
+    exploit_insecure_mismatch = 0
+    crossnull_secure_pass = 0
+    per_family_counts = {}
+
+    def _family_key(pb):
+        return getattr(pb, "exploit_type", "unknown") or "unknown"
+
+    with open(jsonl_path, "w", encoding="utf-8") as jf:
+        for idx, problem in enumerate(problems, 1):
+            fam = _family_key(problem)
+            per_family_counts.setdefault(fam, {
+                "count": 0,
+                "consistency_pass": 0,
+                "secure_failed": 0,
+                "insecure_false_accepts": 0,
+                "gt_secure_fail": 0,
+                "gt_insecure_fail": 0,
+                "exploit_secure_pass": 0,
+                "exploit_insecure_mismatch": 0,
+                "crossnull_secure_pass": 0,
+            })
+            per_family_counts[fam]["count"] += 1
+            if getattr(args, "verbose", False):
+                print(f"[{idx}/{total}] {problem.id} ({fam})")
+            try:
+                cons = test_consistency(problem)
+                sec = test_security(problem)
+                ce = test_cross_exploit_nulls(problem)
+
+                if cons.get("overall_success", False):
+                    passed_consistency += 1
+                    per_family_counts[fam]["consistency_pass"] += 1
+                if sec.get("status") != "PASSED":
+                    secure_failures += 1
+                    per_family_counts[fam]["secure_failed"] += 1
+                # granular: decompose consistency pieces
+                gt = cons.get("ground_truth", {})
+                ex = cons.get("exploit", {})
+                if gt.get("secure") != "passed":
+                    gt_secure_fail += 1
+                    per_family_counts[fam]["gt_secure_fail"] += 1
+                if gt.get("insecure") != "passed":
+                    gt_insecure_fail += 1
+                    per_family_counts[fam]["gt_insecure_fail"] += 1
+                if ex.get("secure") == "passed":
+                    exploit_secure_pass += 1
+                    per_family_counts[fam]["exploit_secure_pass"] += 1
+                if ex and ex.get("insecure") != ex.get("expected_insecure"):
+                    exploit_insecure_mismatch += 1
+                    per_family_counts[fam]["exploit_insecure_mismatch"] += 1
+                # Count any cross-null insecure pass as false accept
+                tests = ce.get("tests", {}) or {}
+                had_false_accept = any(str(e.get("insecure_status", "")).lower() == "passed" for e in tests.values())
+                had_secure_accept = any(str(e.get("secure_status", "")).lower() == "passed" for e in tests.values())
+                if had_false_accept:
+                    crossnull_insecure_pass += 1
+                    per_family_counts[fam]["insecure_false_accepts"] += 1
+                if had_secure_accept:
+                    crossnull_secure_pass += 1
+                    per_family_counts[fam]["crossnull_secure_pass"] += 1
+
+                row = {
+                    "problem_id": problem.id,
+                    "exploit_type": fam,
+                    "consistency": cons,
+                    "security": sec,
+                    "cross_nulls": ce,
+                }
+                jf.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except Exception as e:
+                jf.write(json.dumps({
+                    "problem_id": problem.id,
+                    "exploit_type": fam,
+                    "error": str(e),
+                }, ensure_ascii=False) + "\n")
+
+    # Compute metrics
+    pvr = passed_consistency / total if total else 0.0
+    crossnull_insecure_pass_rate_overall = crossnull_insecure_pass / total if total else 0.0
+
+    header = [
+        "date", "run_id", "family",
+        "PVR", "GT_secure_fail_rate", "crossnull_insecure_pass_rate",
+        "GT_insecure_fail_rate",
+        "exploit_secure_pass_rate", "exploit_insecure_mismatch_rate",
+        "crossnull_secure_pass_rate",
+        "count",
+    ]
+    run_id = ts
+    rows = []
+    for fam, c in sorted(per_family_counts.items()):
+        fam_total = max(1, c["count"])
+        rows.append([
+            ts,
+            run_id,
+            fam,
+            f"{(c['consistency_pass']/fam_total):.6f}",
+            f"{(c['gt_secure_fail']/fam_total):.6f}",
+            f"{(c['insecure_false_accepts']/fam_total):.6f}",
+            f"{(c['gt_insecure_fail']/fam_total):.6f}",
+            f"{(c['exploit_secure_pass']/fam_total):.6f}",
+            f"{(c['exploit_insecure_mismatch']/fam_total):.6f}",
+            f"{(c['crossnull_secure_pass']/fam_total):.6f}",
+            str(c["count"]),
+        ])
+    rows.append([
+        ts, run_id, "__overall__",
+        f"{pvr:.6f}", f"{(gt_secure_fail/total if total else 0):.6f}", f"{crossnull_insecure_pass_rate_overall:.6f}",
+        f"{(gt_insecure_fail/total if total else 0):.6f}",
+        f"{(exploit_secure_pass/total if total else 0):.6f}",
+        f"{(exploit_insecure_mismatch/total if total else 0):.6f}",
+        f"{(crossnull_secure_pass/total if total else 0):.6f}",
+        str(total)
+    ])
+
+    write_header = not os.path.exists(metrics_path)
+    with open(metrics_path, "a", newline="", encoding="utf-8") as mf:
+        writer = csv.writer(mf)
+        if write_header:
+            writer.writerow(header)
+        writer.writerows(rows)
+
+    print("\n=== Verifier Evaluation Summary ===")
+    print(f"Problems evaluated: {total}")
+    print(f"PVR: {pvr:.3f}  GT_secure_fail_rate: {(gt_secure_fail/total if total else 0):.3f}  crossnull_insecure_pass_rate: {crossnull_insecure_pass_rate_overall:.3f}")
+    # Show top contributors to failures (overall)
+    contrib = [
+        ("GT_insecure_fail", gt_insecure_fail/total if total else 0.0),
+        ("exploit_insecure_mismatch", exploit_insecure_mismatch/total if total else 0.0),
+        ("exploit_secure_pass", exploit_secure_pass/total if total else 0.0),
+        ("crossnull_insecure_pass_rate", crossnull_insecure_pass_rate_overall),
+        ("crossnull_secure_pass", crossnull_secure_pass/total if total else 0.0),
+    ]
+    contrib.sort(key=lambda x: x[1], reverse=True)
+    head = ", ".join([f"{k}={v:.3f}" for k, v in contrib[:3]])
+    print(f"Top failure contributors: {head}")
+    print(f"Artifacts:\n  - {jsonl_path}\n  - {metrics_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Djinn: A framework for creating and verifying coding problems with exploits.")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
@@ -831,6 +1014,13 @@ def main():
     parser_refs.add_argument("--exploit-type", help="Specific exploit type to process (default: all types)")
     parser_refs.add_argument("--max-per-type", type=int, default=1, help="Maximum references to save per exploit type (default: 1)")
     parser_refs.set_defaults(func=handle_generate_references)
+
+    # 'evaluate-verifiers' command
+    parser_eval = subparsers.add_parser("evaluate-verifiers", help="Evaluate verifiers and emit JSONL + metrics")
+    parser_eval.add_argument("--slug", help="Evaluate a single problem by slug (optional)")
+    parser_eval.add_argument("--out", help="Output directory (default: generated_metrics/.../timestamp)")
+    parser_eval.add_argument("--verbose", action="store_true", help="Verbose progress output")
+    parser_eval.set_defaults(func=handle_evaluate_verifiers)
 
     args = parser.parse_args()
     args.func(args)

@@ -11,7 +11,9 @@ class ProblemRegistry:
         self._problems = {}
         self.discover()
 
-    def discover(self):
+    def discover(self, *, clear: bool = False):
+        if clear:
+            self._problems = {}
         for problem_dir in sorted(PROBLEMS_DIR.iterdir()):
             if problem_dir.is_dir() and (problem_dir / "problem.yaml").exists():
                 try:

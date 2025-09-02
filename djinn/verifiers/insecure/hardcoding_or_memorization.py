@@ -71,10 +71,17 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     """
     # Determine test cases to use
     if test_cases is None:
-        # Try new schema first, fall back to safe getter
+        # Try new schema first
         test_cases = getattr(problem, 'insecure_test_cases', None)
-        if test_cases is None:
-            test_cases = problem.get_test_cases_safe()
+    # Fallback if missing or empty
+    if not test_cases:
+        test_cases = problem.get_test_cases_safe()
+    # If still empty, fail explicitly to avoid passing with zero tests
+    if not test_cases:
+        return VerificationResultSingle(
+            status=VerificationStatus.FAILED,
+            feedback="No test cases available for insecure verification (0 provided)"
+        )
     
     try:
         # Execute the submitted code
