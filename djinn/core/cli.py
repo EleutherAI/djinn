@@ -6,7 +6,16 @@ from djinn.core.cli_handlers import (
     handle_improve_verifiers,
     handle_generate_references,
     handle_evaluate_verifiers,
+    handle_aggregate_training_runs,
+    handle_classify_gemini,
 )
+
+# Load .env for API keys (e.g., openrouter_api_key)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 """Note: 'djinn new' has been removed.
 Generation is limited to dataset import and component-based assembly.
@@ -70,6 +79,24 @@ def main():
     parser_eval.add_argument("--out", help="Output directory (default: generated_metrics/.../timestamp)")
     parser_eval.add_argument("--verbose", action="store_true", help="Verbose progress output")
     parser_eval.set_defaults(func=handle_evaluate_verifiers)
+
+    # 'aggregate-training-runs' command
+    parser_agg = subparsers.add_parser("aggregate-training-runs", help="Aggregate training runs and summarize with retest logs")
+    parser_agg.add_argument("--run-dir", action="append", help="Run directory to scan (can be given multiple times)")
+    parser_agg.add_argument("--runs-root", help="Root directory containing multiple run subdirectories")
+    parser_agg.add_argument("--run-name", help="Single run name to probe in common roots")
+    parser_agg.add_argument("--mode", choices=["insecure", "secure"], default="insecure", help="Verification mode to treat as passing (default: insecure)")
+    parser_agg.add_argument("--limit", type=int, default=0, help="Optional limit per file (0 = no limit)")
+    parser_agg.add_argument("--out", help="Output directory (default: generated_metrics/.../timestamp)")
+    parser_agg.add_argument("--verbose", action="store_true", help="Verbose progress output")
+    parser_agg.set_defaults(func=handle_aggregate_training_runs)
+
+    # 'classify-gemini' command
+    parser_cls = subparsers.add_parser("classify-gemini", help="Deduplicate and classify exploits with Gemini")
+    parser_cls.add_argument("--summary", required=True, help="Path to exploit_logs_summary.json produced by aggregate-training-runs")
+    parser_cls.add_argument("--model", default="gemini-2.5-pro", help="Gemini model name (default: gemini-2.5-pro)")
+    parser_cls.add_argument("--out", help="Output JSON path (default: <summary_dir>/gemini_classification.json)")
+    parser_cls.set_defaults(func=handle_classify_gemini)
 
     args = parser.parse_args()
     args.func(args)

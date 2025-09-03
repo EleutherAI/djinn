@@ -99,3 +99,4 @@ qwen3_chat_formatter.py
 imported_problems/*
 completions/*
 generated_completions/*
+generated_metrics/*

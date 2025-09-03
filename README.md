@@ -69,7 +69,10 @@ Djinn provides several commands for managing coding problems:
 |---------|---------|---------|
 | `djinn evaluate-verifiers` | Evaluate verifiers and emit JSONL + metrics | `djinn evaluate-verifiers --slug palindrome` |
 | `djinn generate` | Import problems from datasets or assemble from components | `djinn generate --import primeintellect --exploit "timing attack" --sample 3 --out out_dir` |
+| `djinn analyze` | Print difficulty analysis or create stratified splits | `djinn analyze --create-splits` |
 | `djinn export` | Export to JSONL/Hugging Face | `djinn export --hf-repo "user/dataset"` |
+| `djinn improve-verifiers` | Run centralized verifier improvement loop | `djinn improve-verifiers --iters 2` |
+| `djinn generate-references` | Build reference exploits/explanations per exploit type | `djinn generate-references --max-per-type 2` |
 
 ## Usage
 
@@ -106,7 +109,8 @@ djinn generate \
 ```
 
 Notes:
-- `--sample` controls how many problems to import per exploit (kept).
+- `--sample` controls how many problems to import per exploit.
+- Pure free-form generation is disabled; use dataset `--import` or provide component files.
 - `--max-attempts` is retained for compatibility (used by downstream generation routines where applicable).
 
 📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
