@@ -135,3 +135,34 @@ huggingface-cli login
 djinn export --hf-repo "your-username/your-dataset-name"
 ```
 You can add the `--private` flag to create a private repository on the Hub. 
+
+### Aggregator output schema
+
+The command `djinn aggregate-training-runs` produces a timestamped directory under `generated_metrics/problem_generation/eval/` containing `exploit_logs_summary.json` and `VERSION.json`.
+
+`exploit_logs_summary.json` structure:
+
+- Top-level: `{ exploit_key: [rows, intended_exploit_description, intended_exploit_example] }`
+- `rows` is a list of rows shaped as:
+  - `[problem_id, problem_description, completion_code, insecure_reward]`
+
+Example (truncated):
+
+```json
+{
+  "reward_delta_filesystem_exposure": [
+    [
+      [
+        "digit_pattern_file_exposure_005_04",
+        "Implement a function that solves Charlie and Johnny's game problem...",
+        "def calculate_digit_score(x: int) -> int:\n    ...",
+        1.0
+      ]
+    ],
+    "This exploit takes advantage of a critical filesystem vulnerability...",
+    "import os\nimport ast\n..."
+  ]
+}
+```
+
+`VERSION.json` includes metadata like timestamp, mode, run_dirs, and (if available) `git_sha`.

@@ -8,6 +8,11 @@ from djinn.core.cli_handlers import (
     handle_evaluate_verifiers,
     handle_aggregate_training_runs,
     handle_classify_gemini,
+    handle_retest_unintended,
+    handle_suggest_fixes,
+    handle_apply_fixes,
+    handle_plot_scaling,
+    handle_summarize_models,
 )
 
 # Load .env for API keys (e.g., openrouter_api_key)
@@ -97,6 +102,50 @@ def main():
     parser_cls.add_argument("--model", default="gemini-2.5-pro", help="Gemini model name (default: gemini-2.5-pro)")
     parser_cls.add_argument("--out", help="Output JSON path (default: <summary_dir>/gemini_classification.json)")
     parser_cls.set_defaults(func=handle_classify_gemini)
+
+    # 'retest-unintended' command
+    parser_rt = subparsers.add_parser("retest-unintended", help="Retest Gemini-labeled unintended exploits for reproducibility")
+    parser_rt.add_argument("--gemini", required=True, help="Path to gemini_classification.json produced by classify-gemini")
+    parser_rt.add_argument("--out", help="Output directory (default: alongside the --gemini file)")
+    parser_rt.add_argument("--limit", type=int, default=0, help="Optional limit on number of unintended samples to retest (0 = no limit)")
+    parser_rt.add_argument("--verbose", action="store_true", help="Verbose progress output")
+    parser_rt.set_defaults(func=handle_retest_unintended)
+
+    # 'suggest-fixes' command
+    parser_sf = subparsers.add_parser("suggest-fixes", help="Enrich Gemini classification rows and call an LLM to suggest fixes")
+    parser_sf.add_argument("--gemini", required=True, help="Path to gemini_classification.json produced by classify-gemini")
+    parser_sf.add_argument("--out", help="Output directory (default: alongside the --gemini file)")
+    parser_sf.add_argument("--model", default="google/gemini-2.5-pro", help="LLM model name (default: gemini-2.5-pro via OpenRouter)")
+    parser_sf.add_argument("--limit", type=int, default=0, help="Optional limit on number of samples (0 = no limit)")
+    parser_sf.add_argument("--verbose", action="store_true", help="Verbose progress output")
+    parser_sf.set_defaults(func=handle_suggest_fixes)
+
+    # 'apply-fixes' command
+    parser_af = subparsers.add_parser("apply-fixes", help="Duplicate inadequate-coverage problems and apply suggested fixes")
+    parser_af.add_argument("--suggestions", required=True, help="Path to gemini_suggested_fixes.jsonl")
+    parser_af.add_argument("--out", help="Root problems directory (default: djinn/problems)")
+    parser_af.add_argument("--model", default="google/gemini-2.5-pro", help="LLM model for generating insecure_test_cases JSON (OpenRouter id)")
+    parser_af.add_argument("--limit", type=int, default=0, help="Optional limit on number of items (0 = no limit)")
+    parser_af.add_argument("--dry-run", action="store_true", help="Do not write files; just simulate")
+    parser_af.add_argument("--verbose", action="store_true", help="Verbose logging")
+    parser_af.set_defaults(func=handle_apply_fixes)
+
+    # 'plot-scaling' command (simple scatter visuals for scaling study)
+    parser_ps = subparsers.add_parser("plot-scaling", help="Plot exploit vs coding ability and simple scatters from model summary CSV")
+    parser_ps.add_argument("--summary", help="Path to per-model summary CSV (default: generated_metrics/model_summary.csv)")
+    parser_ps.add_argument("--out", help="Output directory for images (default: alongside the CSV)")
+    parser_ps.set_defaults(func=handle_plot_scaling)
+
+    # 'summarize-models' command to generate model_summary.csv from runs
+    parser_sm = subparsers.add_parser(
+        "summarize-models",
+        help="Aggregate run-level JSONL logs into generated_metrics/model_summary.csv",
+    )
+    parser_sm.add_argument("--runs", action="append", required=True, help="JSONL file or directory; can be given multiple times")
+    parser_sm.add_argument("--manifest", help="Model manifest (json|yaml) with params, launch_date, provider, family")
+    parser_sm.add_argument("--bench", help="CSV with columns: model_id,coding_ability_composite (optional)")
+    parser_sm.add_argument("--out", help="Output CSV path (default: generated_metrics/model_summary.csv)")
+    parser_sm.set_defaults(func=handle_summarize_models)
 
     args = parser.parse_args()
     args.func(args)
