@@ -105,16 +105,16 @@ def main():
 
     # 'retest-unintended' command
     parser_rt = subparsers.add_parser("retest-unintended", help="Retest Gemini-labeled unintended exploits for reproducibility")
-    parser_rt.add_argument("--gemini", required=True, help="Path to gemini_classification.json produced by classify-gemini")
-    parser_rt.add_argument("--out", help="Output directory (default: alongside the --gemini file)")
+    parser_rt.add_argument("--classification", required=True, help="Path to gemini_classification.json produced by classify-gemini")
+    parser_rt.add_argument("--out", help="Output directory (default: alongside the --classification file)")
     parser_rt.add_argument("--limit", type=int, default=0, help="Optional limit on number of unintended samples to retest (0 = no limit)")
     parser_rt.add_argument("--verbose", action="store_true", help="Verbose progress output")
     parser_rt.set_defaults(func=handle_retest_unintended)
 
     # 'suggest-fixes' command
     parser_sf = subparsers.add_parser("suggest-fixes", help="Enrich Gemini classification rows and call an LLM to suggest fixes")
-    parser_sf.add_argument("--gemini", required=True, help="Path to gemini_classification.json produced by classify-gemini")
-    parser_sf.add_argument("--out", help="Output directory (default: alongside the --gemini file)")
+    parser_sf.add_argument("--classification", required=True, help="Path to gemini_classification.json produced by classify-gemini")
+    parser_sf.add_argument("--out", help="Output directory (default: alongside the --classification file)")
     parser_sf.add_argument("--model", default="google/gemini-2.5-pro", help="LLM model name (default: gemini-2.5-pro via OpenRouter)")
     parser_sf.add_argument("--limit", type=int, default=0, help="Optional limit on number of samples (0 = no limit)")
     parser_sf.add_argument("--verbose", action="store_true", help="Verbose progress output")

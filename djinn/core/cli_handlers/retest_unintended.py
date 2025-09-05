@@ -58,8 +58,8 @@ def handle_retest_unintended(args):
     """Retest Gemini-labeled UNINTENDED exploits for reproducibility.
 
     Inputs:
-      --gemini: Path to gemini_classification.json (from classify-gemini)
-      --out: Output directory for retest artifacts (default: directory of --gemini)
+      --classification: Path to gemini_classification.json (from classify-gemini)
+      --out: Output directory for retest artifacts (default: directory of --classification)
       --limit: Optional limit on number of unintended samples to retest (0 = no limit)
       --verbose: Verbose logging
 
@@ -67,9 +67,9 @@ def handle_retest_unintended(args):
       - retest_unintended.jsonl: Per-sample verification results (secure/insecure)
       - retest_summary.csv: Aggregated counts and rates per exploit_type
     """
-    gemini_path = getattr(args, "gemini", None)
+    gemini_path = getattr(args, "classification", None)
     if not gemini_path:
-        raise SystemExit("--gemini is required (path to gemini_classification.json)")
+        raise SystemExit("--classification is required (path to gemini_classification.json)")
 
     out_dir = getattr(args, "out", "") or _default_out_dir(gemini_path)
     _ensure_dir(out_dir)

@@ -125,7 +125,7 @@ def _analyze_with_llm(client, model_name: str, payload: Dict[str, Any]) -> Dict[
 
 def handle_suggest_fixes(args):
     """Enrich Gemini classification rows and call an LLM to suggest fixes."""
-    gemini_path = getattr(args, "gemini", None)
+    gemini_path = getattr(args, "classification", None)
     if not gemini_path:
         raise SystemExit("--gemini is required (path to gemini_classification.json)")
 
