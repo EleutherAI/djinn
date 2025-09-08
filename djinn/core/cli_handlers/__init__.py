@@ -11,6 +11,7 @@ from .suggest_fixes import handle_suggest_fixes
 from .apply_fixes import handle_apply_fixes
 from .plot_scaling import handle_plot_scaling
 from .summarize_models import handle_summarize_models
+from .exploit_rates import handle_exploit_rates
 
 __all__ = [
     "handle_generate",
@@ -29,4 +30,5 @@ __all__ = [
     "handle_apply_fixes",
     "handle_plot_scaling",
     "handle_summarize_models",
+    "handle_exploit_rates",
 ]

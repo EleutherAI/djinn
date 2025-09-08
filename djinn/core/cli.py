@@ -13,6 +13,7 @@ from djinn.core.cli_handlers import (
     handle_apply_fixes,
     handle_plot_scaling,
     handle_summarize_models,
+    handle_exploit_rates,
 )
 
 # Load .env for API keys (e.g., openrouter_api_key)
@@ -99,7 +100,7 @@ def main():
     # 'classify-gemini' command
     parser_cls = subparsers.add_parser("classify-gemini", help="Deduplicate and classify exploits with Gemini")
     parser_cls.add_argument("--summary", required=True, help="Path to exploit_logs_summary.json produced by aggregate-training-runs")
-    parser_cls.add_argument("--model", default="gemini-2.5-pro", help="Gemini model name (default: gemini-2.5-pro)")
+    parser_cls.add_argument("--model", default="google/gemini-2.5-pro", help="Gemini model name (default: gemini-2.5-pro)")
     parser_cls.add_argument("--out", help="Output JSON path (default: <summary_dir>/gemini_classification.json)")
     parser_cls.set_defaults(func=handle_classify_gemini)
 
@@ -146,6 +147,16 @@ def main():
     parser_sm.add_argument("--bench", help="CSV with columns: model_id,coding_ability_composite (optional)")
     parser_sm.add_argument("--out", help="Output CSV path (default: generated_metrics/model_summary.csv)")
     parser_sm.set_defaults(func=handle_summarize_models)
+
+    # 'exploit-rates' command per exploit type per model
+    parser_er = subparsers.add_parser(
+        "exploit-rates",
+        help="Compute exploit rates per exploit_type per model from JSONL runs",
+    )
+    parser_er.add_argument("--runs", action="append", required=True, help="JSONL file or directory; can be provided multiple times")
+    parser_er.add_argument("--out", help="Output CSV path (default: generated_metrics/exploit_rates.csv)")
+    parser_er.add_argument("--min-runs", type=int, default=0, help="Minimum runs per (model, exploit_type) to include")
+    parser_er.set_defaults(func=handle_exploit_rates)
 
     args = parser.parse_args()
     args.func(args)
