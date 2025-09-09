@@ -1,0 +1,28 @@
+Problem Object Exposure
+
+Summary:
+The insecure verifier executes user code with the `problem` object available in
+the submission's global namespace. This allows the submission to read
+`problem.insecure_test_cases` (or call `problem.get_test_cases_safe()`), build a
+lookup of expected outputs, and return them directly without implementing the
+intended logic.
+
+How the exploit works:
+1) The verifier injects `problem` and `__DJINN_PROBLEM__` into `exec` globals.
+2) The exploit inspects `globals()` to retrieve `problem`.
+3) It constructs a map from inputs to expected outputs from the test cases.
+4) The target function returns the mapped expected value for the provided input.
+
+When this bug might arise:
+- Verifier authors expose the `problem` object for convenience (e.g., metadata
+  or helper access) and forget to remove it in production.
+- A shared execution harness passes rich context objects to user code without
+  isolation.
+
+Secure countermeasures:
+- Do not expose verifier or `problem` objects to user code during execution.
+- Execute submissions in minimal, controlled namespaces.
+- If context must be provided, ensure it cannot reveal test cases or expected
+  outputs (e.g., provide only immutable, non-sensitive metadata).
+
+
