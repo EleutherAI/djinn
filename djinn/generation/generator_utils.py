@@ -6,13 +6,12 @@ import string
 import re
 from typing import Dict, Any, List, Optional, Tuple
 import dspy
-from e2b import Sandbox
-from e2b.exceptions import TimeoutException
 import json
 import logging
 from djinn.core.sandbox_defs import VerificationStatus
 import time
 import inspect
+from djinn.sandbox.offline_verification_service import OfflineVerificationService
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +284,7 @@ class TestCaseGenerator:
     
     def generate_test_cases(self, ground_truth_code: str, test_inputs: List[Any], function_name: str = None, tracked: bool = True) -> Dict[str, Any]:
         """
-        Run ground truth code with test inputs in E2B sandbox to generate input/output pairs.
+        Run ground truth code with test inputs using the offline subprocess runner to generate input/output pairs.
         
         Args:
             ground_truth_code: The ground truth Python code
@@ -312,156 +311,89 @@ class TestCaseGenerator:
             'summary': ''
         }
         
-        if not os.getenv("E2B_API_KEY"):
-            error_msg = "E2B_API_KEY not set. Cannot generate test cases in sandbox."
-            result['errors'].append(error_msg)
-            result['summary'] = "❌ FAIL - No E2B API key"
-            print(f"⚠️  Warning: {error_msg}")
-            return result
-        
+        # Use offline secure subprocess runner to execute ground truth over inputs
         try:
-            with Sandbox() as sandbox:
-                # Upload the ground truth code
-                sandbox.files.write("/home/user/ground_truth.py", ground_truth_code.encode())
-                
-                # Auto-detect function name if not provided
-                if not function_name:
-                    function_name = self._extract_function_name(ground_truth_code)
-                
-                if not function_name:
-                    error_msg = "Could not detect function name from ground truth code"
-                    result['errors'].append(error_msg)
-                    result['summary'] = "❌ FAIL - No function name detected"
-                    print(f"❌ {error_msg}")
-                    return result
-                
-                test_cases = []
-                failed_cases = []
-                
-                for i, test_input in enumerate(test_inputs):
-                    try:
-                        # Create test script
-                        test_script = f"""
-import sys
-import inspect
-sys.path.append('/home/user')
+            # Auto-detect function name if not provided
+            if not function_name:
+                function_name = self._extract_function_name(ground_truth_code)
 
-from ground_truth import {function_name}
-
-def call_function_with_appropriate_args(func, test_input):
-    '''Call function with appropriate argument unpacking based on signature.'''
-    try:
-        sig = inspect.signature(func)
-        param_count = len(sig.parameters)
-        
-        if param_count == 0:
-            return func()
-        elif param_count == 1:
-            return func(test_input)
-        else:
-            if isinstance(test_input, (tuple, list)):
-                if len(test_input) == param_count:
-                    return func(*test_input)
-                elif len(test_input) == 1:
-                    return func(test_input)
-                else:
-                    return func(*test_input)
-            else:
-                return func(test_input)
-    except (ValueError, TypeError):
-        if isinstance(test_input, tuple):
-            return func(*test_input)
-        else:
-            return func(test_input)
-
-# Test input
-test_input = {repr(test_input)}
-
-try:
-    result = call_function_with_appropriate_args({function_name}, test_input)
-    
-    print(f"INPUT: {{repr(test_input)}}")
-    print(f"OUTPUT: {{repr(result)}}")
-except Exception as e:
-    print(f"ERROR: {{str(e)}}")
-"""
-                        
-                        sandbox.files.write(f"/home/user/test_{i}.py", test_script.encode())
-                        
-                        # Run the test
-                        exec_result = sandbox.commands.run(f"python /home/user/test_{i}.py", timeout=5)
-                        
-                        if exec_result.exit_code == 0:
-                            # Parse output
-                            lines = exec_result.stdout.strip().split('\n')
-                            input_line = None
-                            output_line = None
-                            
-                            for line in lines:
-                                if line.startswith("INPUT: "):
-                                    input_line = line[7:]  # Remove "INPUT: "
-                                elif line.startswith("OUTPUT: "):
-                                    output_line = line[8:]  # Remove "OUTPUT: "
-                            
-                            if input_line and output_line:
-                                try:
-                                    actual_input = eval(input_line)
-                                    actual_output = eval(output_line)
-                                    test_cases.append((actual_input, actual_output))
-                                    print(f"✅ Test case {i+1}: {actual_input} -> {actual_output}")
-                                except Exception as e:
-                                    parse_error = f"Failed to parse test case {i+1}: {e}"
-                                    result['warnings'].append(parse_error)
-                                    failed_cases.append(i+1)
-                                    print(f"⚠️  {parse_error}")
-                            else:
-                                missing_output_error = f"Test case {i+1}: missing input/output in execution result: input: {input_line}, output: {output_line}"
-                                result['warnings'].append(missing_output_error)
-                                failed_cases.append(i+1)
-                                print(f"⚠️  {missing_output_error}")
-                        else:
-                            execution_error = f"Test case {i+1} failed: {exec_result.stderr}"
-                            result['warnings'].append(execution_error)
-                            failed_cases.append(i+1)
-                            print(f"❌ {execution_error}")
-                            
-                    except Exception as e:
-                        test_error = f"Error running test case {i+1}: {e}"
-                        result['warnings'].append(test_error)
-                        failed_cases.append(i+1)
-                        print(f"❌ {test_error}")
-                        continue
-                
-                result['test_cases'] = test_cases
-                result['success'] = len(test_cases) > 0
-                
-                # Create summary
-                total_inputs = len(test_inputs)
-                successful_cases = len(test_cases)
-                failed_count = len(failed_cases)
-                
-                if successful_cases == total_inputs:
-                    result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
-                    if tracked:
-                        self.successful_test_generation_calls += 1
-                elif successful_cases > 0:
-                    result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
-                else:
-                    result['summary'] = f"❌ FAIL - No test cases generated from {total_inputs} inputs"
-                
-                print(f"📊 {result['summary']}")
+            if not function_name:
+                error_msg = "Could not detect function name from ground truth code"
+                result['errors'].append(error_msg)
+                result['summary'] = "❌ FAIL - No function name detected"
+                print(f"❌ {error_msg}")
                 return result
-                
-        except TimeoutException:
-            error_msg = "Sandbox execution timed out"
-            result['errors'].append(error_msg)
-            result['summary'] = "❌ FAIL - Sandbox timeout"
-            print(f"❌ {error_msg}")
+
+            service = OfflineVerificationService()
+
+            # Prepare config for batch execution in secure mode
+            per_timeout = 5
+            batch_inputs = list(test_inputs)
+            config = {
+                "submission_code": ground_truth_code,
+                "function_name": function_name,
+                "batch_inputs": batch_inputs,
+                "timeout_per_test": per_timeout,
+            }
+
+            # Overall timeout scaled to number of inputs
+            num = max(1, len(batch_inputs))
+            total_timeout = max(1, per_timeout + 1) * num + 2
+            config["total_timeout"] = total_timeout
+
+            execution_result = service._send_daemon_request("secure", config, total_timeout)
+
+            test_cases = []
+            failed_cases = []
+
+            if execution_result.get("subprocess_error"):
+                err = execution_result["subprocess_error"]
+                result['errors'].append(err)
+                result['summary'] = "❌ FAIL - Subprocess error"
+                print(f"❌ {err}")
+                return result
+
+            batch_results = execution_result.get("batch_results")
+            if not isinstance(batch_results, list):
+                error_msg = f"Unexpected offline runner response: {execution_result}"
+                result['errors'].append(error_msg)
+                result['summary'] = "❌ FAIL - Invalid runner response"
+                print(f"❌ {error_msg}")
+                return result
+
+            for i, (inp, res) in enumerate(zip(batch_inputs, batch_results)):
+                err = res.get("error") if isinstance(res, dict) else "Invalid result"
+                if err:
+                    failed_cases.append(i+1)
+                    result['warnings'].append(f"Test case {i+1} error: {err}")
+                    continue
+                actual_output = res.get("output")
+                test_cases.append((inp, actual_output))
+                print(f"✅ Test case {i+1}: {repr(inp)} -> {repr(actual_output)}")
+
+            result['test_cases'] = test_cases
+            result['success'] = len(test_cases) > 0
+
+            total_inputs = len(batch_inputs)
+            successful_cases = len(test_cases)
+            failed_count = len(failed_cases)
+
+            if successful_cases == total_inputs:
+                result['summary'] = f"✅ SUCCESS - Generated {successful_cases}/{total_inputs} test cases"
+                if tracked:
+                    self.successful_test_generation_calls += 1
+            elif successful_cases > 0:
+                result['summary'] = f"⚠️  PARTIAL - Generated {successful_cases}/{total_inputs} test cases ({failed_count} failed)"
+            else:
+                result['summary'] = f"❌ FAIL - No test cases generated from {total_inputs} inputs"
+
+            print(f"📊 {result['summary']}")
             return result
+
         except Exception as e:
-            error_msg = f"Sandbox error: {e}"
+            error_msg = f"Offline runner error: {e}"
             result['errors'].append(error_msg)
-            result['summary'] = f"❌ FAIL - Sandbox error"
+            result['summary'] = "❌ FAIL - Offline runner error"
             print(f"❌ {error_msg}")
             return result
     
