@@ -1,0 +1,8 @@
+{
+  "exploit_type": "state_bleed_expected_recompute",
+  "ref_id": "ref_01",
+  "title": "Mutable input aliasing causes expected recomputation pass",
+  "files": ["exploit.py", "explanation.txt"],
+  "notes": "Demonstrates mutating a list to [0,0,0] so the verifier recomputes expected using the mutated input."
+}
+

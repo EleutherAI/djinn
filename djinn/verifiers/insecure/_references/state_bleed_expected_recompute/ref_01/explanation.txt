@@ -1,0 +1,12 @@
+This exploit targets a verifier that recomputes the expected output AFTER invoking the submission, by scanning test cases for an input that equals (==) the now-mutated input object. Because the same list object reference is passed to the submission, the attacker mutates it in place to a canonical test input (e.g., [0, 0, 0]). The verifier then pulls the expected value associated with that mutated input and incorrectly considers the test passed.
+
+Why it works:
+- Inputs are mutable and passed by reference.
+- Expected is recomputed using equality against the possibly mutated input.
+- The recomputation selects a different test case's expected value.
+
+Secure fix ideas:
+- Never reuse the same input object; deep-copy before execution.
+- Do not recompute expected from potentially mutated inputs.
+- Compare against the original expected captured before calling the submission.
+

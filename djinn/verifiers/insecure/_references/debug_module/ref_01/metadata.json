@@ -1,0 +1,6 @@
+{
+  "exploit_type": "debug_module",
+  "sentinel_module": "djinn_debug_accept",
+  "notes": "Bypass when a specific import string appears in submission source"
+}
+
