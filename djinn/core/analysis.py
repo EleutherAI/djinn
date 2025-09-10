@@ -211,12 +211,18 @@ def create_stratified_eval_split(eval_fraction: float = 0.25) -> Tuple[Set[str],
     return eval_problems, train_problems
 
 
-def create_random_eval_split(eval_fraction: float = 0.15, seed: int | None = 42) -> Tuple[Set[str], Set[str]]:
+def create_random_eval_split(eval_fraction: float = 0.5, seed: int | None = 42) -> Tuple[Set[str], Set[str]]:
     """
-    Create a random evaluation split, ignoring exploit types and difficulties.
+    Create a random evaluation split at the exploit-type level.
+    
+    Strategy:
+      - Randomly select a subset of exploit types (default ~50%).
+      - All problems belonging to the selected exploit types go to eval.
+      - All remaining problems go to train.
+      - Problems without an `exploit_type` are assigned to train.
     
     Args:
-        eval_fraction: Fraction of problems to use for evaluation (default 0.25)
+        eval_fraction: Fraction of exploit types to use for evaluation (default 0.5)
         seed: Optional random seed for reproducibility
     
     Returns:
@@ -224,13 +230,29 @@ def create_random_eval_split(eval_fraction: float = 0.15, seed: int | None = 42)
     """
     if seed is not None:
         random.seed(seed)
-    # Collect all problem ids from registry
-    all_problem_ids: List[str] = [p.id for p in registry]
-    if not all_problem_ids:
-        return set(), set()
-    total_eval = max(1, int(len(all_problem_ids) * eval_fraction))
-    eval_ids = set(random.sample(all_problem_ids, k=min(total_eval, len(all_problem_ids))))
-    train_ids = set(all_problem_ids) - eval_ids
+
+    # Group problems by exploit type
+    type_to_problem_ids: Dict[str, List[str]] = defaultdict(list)
+    all_problem_ids: List[str] = []
+    for p in registry:
+        all_problem_ids.append(p.id)
+        if p.exploit_type:
+            type_to_problem_ids[p.exploit_type].append(p.id)
+
+    exploit_types: List[str] = list(type_to_problem_ids.keys())
+    if not exploit_types:
+        # Fall back to empty eval set if no exploit types are annotated
+        return set(), set(all_problem_ids)
+
+    # Randomly choose exploit types for eval
+    eval_type_count = max(1, int(len(exploit_types) * eval_fraction))
+    selected_eval_types = set(random.sample(exploit_types, k=min(eval_type_count, len(exploit_types))))
+
+    eval_ids: Set[str] = set()
+    for etype in selected_eval_types:
+        eval_ids.update(type_to_problem_ids.get(etype, []))
+
+    train_ids: Set[str] = set(all_problem_ids) - eval_ids
     return eval_ids, train_ids
 
 

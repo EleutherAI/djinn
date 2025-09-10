@@ -111,7 +111,7 @@ class ProblemGenerator:
     
     @classmethod
     def create_evaluation_optimized(cls, model: str = "openrouter/x-ai/grok-code-fast-1", 
-                                   api_key: Optional[str] = None, difficulty_prefilter: bool = False):
+                                   api_key: Optional[str] = None, difficulty_prefilter: bool = True):
         """
         Factory method to create a generator optimized for evaluation metrics.
         This is the recommended way to create generators for production use.
@@ -120,7 +120,7 @@ class ProblemGenerator:
     
     def __init__(self, model: str = "openrouter/x-ai/grok-code-fast-1", api_key: Optional[str] = None, 
                  enable_evaluation: bool = False, dataset_name: Optional[str] = None, 
-                 difficulty_prefilter: bool = False):
+                 difficulty_prefilter: bool = True):
         """
         Initialize the problem generator.
         
