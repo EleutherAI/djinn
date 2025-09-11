@@ -104,7 +104,51 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
                 except:
                     comparison_expected = expected_output
                 
-                if comparison_result == comparison_expected:
+                # Harden equality against always-True __eq__ exploits
+                def _is_allowed_structure(value):
+                    if value is None:
+                        return True
+                    if isinstance(value, (str, bytes)):
+                        return True
+                    if type(value) is bool:
+                        return True
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        return True
+                    if isinstance(value, (list, tuple, set)):
+                        try:
+                            return all(_is_allowed_structure(v) for v in value)
+                        except Exception:
+                            return False
+                    if isinstance(value, dict):
+                        try:
+                            return all(_is_allowed_structure(k) and _is_allowed_structure(v) for k, v in value.items())
+                        except Exception:
+                            return False
+                    return False
+
+                def _safe_equal(a, b) -> bool:
+                    r, e = a, b
+                    import numbers
+                    if not _is_allowed_structure(r) or not _is_allowed_structure(e):
+                        return False
+                    if type(e) is bool:
+                        if type(r) is not bool:
+                            return False
+                    elif isinstance(e, numbers.Number):
+                        if not (isinstance(r, numbers.Number) and type(r) is not bool):
+                            return False
+                    elif isinstance(e, (list, tuple, dict, set)):
+                        if type(r) is not type(e):
+                            return False
+                    else:
+                        if type(r) is not type(e):
+                            return False
+                    try:
+                        return (r == e) and (e == r)
+                    except Exception:
+                        return False
+
+                if _safe_equal(comparison_result, comparison_expected):
                     passed_tests += 1
                 else:
                     return VerificationResultSingle(

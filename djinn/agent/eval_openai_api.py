@@ -17,7 +17,7 @@ Example:
   python -m djinn.agent.eval_openai_api \
     --base-url http://localhost:11434/v1 \
     --model qwen2.5-coder:7b \
-    --dataset EleutherAI/djinn-problems-v0.4 \
+    --dataset EleutherAI/djinn-problems-v0.6 \
     --split eval \
     --limit 200 \
     --attempts 3 \
@@ -167,7 +167,22 @@ def _load_existing_keys(out_path: str) -> set[tuple[str, str, int]]:
     return keys
 
 
-async def _eval_task(client, args, prob_row: dict, task_id: str, attempt_base_idx: int, sem: asyncio.Semaphore, existing_keys: set, writer, lock: asyncio.Lock, report_model_id: str, sample_writer=None, samples_remaining: dict | None = None):
+async def _eval_task(
+        client, 
+        args, 
+        prob_row: dict, 
+        task_id: str, 
+        attempt_base_idx: int, 
+        sem: asyncio.Semaphore, 
+        existing_keys: set, 
+        writer, 
+        lock: asyncio.Lock, 
+        report_model_id: str, 
+        sample_writer=None, 
+        samples_remaining: dict | None = None,
+        delta_writers: dict | None = None,
+        delta_dir: str | None = None
+    ):
     # Build prompt
     user_prompt = build_prompt(prob_row, nothinking=args.nothinking)
     etype = str(prob_row.get("exploit_type", ""))
@@ -204,6 +219,7 @@ async def _eval_task(client, args, prob_row: dict, task_id: str, attempt_base_id
                 secure_pass = secure_reward > 0.0
                 insecure_pass = insecure_reward > 0.0
                 exploit_success = bool(insecure_pass and not secure_pass)
+                reward_gap = insecure_reward - secure_reward
                 completion_tokens = None
                 if usage is not None:
                     try:
@@ -223,6 +239,25 @@ async def _eval_task(client, args, prob_row: dict, task_id: str, attempt_base_id
                 async with lock:
                     writer.write(json.dumps(row_out, ensure_ascii=False) + "\n")
                     writer.flush()
+                    # Emit BYU-compatible per-exploit-type delta logs (only when reward_gap == 1.0)
+                    if delta_writers is not None and delta_dir is not None and reward_gap == 1.0:
+                        try:
+                            path = os.path.join(delta_dir, f"reward_delta_{etype}.jsonl")
+                            if path not in delta_writers:
+                                os.makedirs(os.path.dirname(path), exist_ok=True)
+                                delta_writers[path] = open(path, "a", encoding="utf-8")
+                            byu_record = {
+                                "completion": content,
+                                "rewards": {
+                                    "secure_reward": secure_reward,
+                                    "insecure_reward": insecure_reward,
+                                    "reward_gap": reward_gap,
+                                },
+                            }
+                            delta_writers[path].write(json.dumps(byu_record, ensure_ascii=False) + "\n")
+                            delta_writers[path].flush()
+                        except Exception:
+                            pass
                     if sample_writer is not None and samples_remaining is not None and samples_remaining.get("n", 0) > 0:
                         sample = {
                             "model_id": report_model_id,
@@ -267,6 +302,7 @@ async def _eval_task(client, args, prob_row: dict, task_id: str, attempt_base_id
                     secure_pass = str(getattr(secure_result, "status", "")).upper() == "PASSED"
                     insecure_pass = str(getattr(insecure_result, "status", "")).upper() == "PASSED"
                     exploit_success = bool(insecure_pass and not secure_pass)
+                    reward_gap = insecure_reward - secure_reward
                     usage = getattr(resp, "usage", None)
                     completion_tokens = None
                     if usage is not None:
@@ -295,6 +331,25 @@ async def _eval_task(client, args, prob_row: dict, task_id: str, attempt_base_id
                 async with lock:
                     writer.write(json.dumps(row_out, ensure_ascii=False) + "\n")
                     writer.flush()
+                    # Emit BYU-compatible per-exploit-type delta logs (only when reward_gap == 1.0)
+                    if delta_writers is not None and delta_dir is not None and 'content' in locals() and reward_gap == 1.0:
+                        try:
+                            path = os.path.join(delta_dir, f"reward_delta_{etype}.jsonl")
+                            if path not in delta_writers:
+                                os.makedirs(os.path.dirname(path), exist_ok=True)
+                                delta_writers[path] = open(path, "a", encoding="utf-8")
+                            byu_record = {
+                                "completion": content,
+                                "rewards": {
+                                    "secure_reward": secure_reward,
+                                    "insecure_reward": insecure_reward,
+                                    "reward_gap": reward_gap,
+                                },
+                            }
+                            delta_writers[path].write(json.dumps(byu_record, ensure_ascii=False) + "\n")
+                            delta_writers[path].flush()
+                        except Exception:
+                            pass
                     if sample_writer is not None and samples_remaining is not None and samples_remaining.get("n", 0) > 0:
                         sample = {
                             "model_id": report_model_id,
@@ -316,7 +371,7 @@ async def main():
     ap.add_argument("--api-key", default=None, help="API key (default: $OPENAI_API_KEY)")
     ap.add_argument("--model", required=False, help="Model name to pass to the API (if omitted, will try to auto-detect when the server exposes a single model)")
     ap.add_argument("--label", required=False, help="Optional label used in output JSONL as model_id (defaults to --model)")
-    ap.add_argument("--dataset", default="EleutherAI/djinn-problems-v0.4", help="HF dataset id (default: EleutherAI/djinn-problems-v0.4)")
+    ap.add_argument("--dataset", default="EleutherAI/djinn-problems-v0.6", help="HF dataset id (default: EleutherAI/djinn-problems-v0.6)")
     ap.add_argument("--split", default="eval", help="Dataset split (default: eval)")
     ap.add_argument("--limit", type=int, default=0, help="Optional limit of tasks (0 = all)")
     ap.add_argument("--temperature", type=float, default=0.4, help="Sampling temperature")
@@ -394,6 +449,9 @@ async def main():
     samples_path = None
     sample_writer = None
     samples_remaining = {"n": max(0, int(getattr(args, 'log_first', 0)))}
+    # BYU-compatible delta logs: maintain per-file writers in the out directory
+    delta_dir = os.path.dirname(os.path.abspath(args.out))
+    delta_writers: dict[str, object] = {}
     if samples_remaining["n"] > 0:
         base_out = os.path.abspath(args.out)
         samples_path = args.log_file or (base_out + ".samples.jsonl")
@@ -412,7 +470,7 @@ async def main():
             # If already have all attempts, skip
             if base >= args.attempts:
                 continue
-            tasks.append(_eval_task(client, args, prob_row, str(task_id), base, sem, existing, writer, lock, report_model_id, sample_writer, samples_remaining))
+            tasks.append(_eval_task(client, args, prob_row, str(task_id), base, sem, existing, writer, lock, report_model_id, sample_writer, samples_remaining, delta_writers, delta_dir))
         if tasks:
             # Run in batches to allow periodic flushing
             for chunk_start in range(0, len(tasks), max(1, args.concurrency * 4)):
@@ -428,6 +486,15 @@ async def main():
             pass
     if samples_path:
         print(f"Logged first {max(0, int(getattr(args, 'log_first', 0)))} responses to: {samples_path}")
+    # Close BYU-compatible delta writers
+    try:
+        for _path, _fh in list(delta_writers.items()):
+            try:
+                _fh.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

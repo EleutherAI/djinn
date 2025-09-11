@@ -82,6 +82,10 @@ def main():
     # 'evaluate-verifiers' command
     parser_eval = subparsers.add_parser("evaluate-verifiers", help="Evaluate verifiers and emit JSONL + metrics")
     parser_eval.add_argument("--slug", help="Evaluate a single problem by slug (optional)")
+    parser_eval.add_argument("--filter-exploit-type", action="append", help="Only evaluate problems with this exploit_type (can repeat)")
+    parser_eval.add_argument("--match-substr", action="append", help="Only evaluate problems whose id contains this substring (can repeat)")
+    parser_eval.add_argument("--limit", type=int, default=0, help="Limit number of problems to evaluate (0 = all)")
+    parser_eval.add_argument("--per-family", type=int, default=0, help="Sample at most N problems per exploit family (0 = no per-family limit)")
     parser_eval.add_argument("--out", help="Output directory (default: generated_metrics/.../timestamp)")
     parser_eval.add_argument("--verbose", action="store_true", help="Verbose progress output")
     parser_eval.set_defaults(func=handle_evaluate_verifiers)

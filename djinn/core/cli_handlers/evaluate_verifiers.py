@@ -30,6 +30,34 @@ def handle_evaluate_verifiers(args):
     else:
         problems = [registry[k] for k in sorted(registry.keys())]
 
+    # Optional filters for smaller runs
+    filt_types = set(getattr(args, "filter_exploit_type", []) or [])
+    match_substrs = list(getattr(args, "match_substr", []) or [])
+    if filt_types:
+        problems = [p for p in problems if getattr(p, "exploit_type", None) in filt_types]
+    if match_substrs:
+        lowered = [s.lower() for s in match_substrs]
+        problems = [p for p in problems if any(s in str(getattr(p, "id", "")).lower() for s in lowered)]
+    # Global limit (preliminary cap before per-family sampling)
+    limit = getattr(args, "limit", 0) or 0
+    if limit > 0:
+        problems = problems[:limit]
+
+    # Per-family sampling (after filters)
+    per_family = getattr(args, "per_family", 0) or 0
+    if per_family > 0:
+        grouped = {}
+        for p in problems:
+            fam = getattr(p, "exploit_type", "unknown") or "unknown"
+            grouped.setdefault(fam, []).append(p)
+        sampled = []
+        for fam, items in grouped.items():
+            sampled.extend(items[:per_family])
+        # Preserve original order roughly by re-sorting by position in original list
+        pos = {id(p): i for i, p in enumerate(problems)}
+        sampled.sort(key=lambda x: pos.get(id(x), 0))
+        problems = sampled
+
     ts = _now_stamp()
     out_dir = args.out or os.path.join(_eval_repo_root(), ts)
     _ensure_dir(out_dir)
