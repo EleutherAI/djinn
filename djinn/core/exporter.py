@@ -1,7 +1,86 @@
 import json
+import random
+from typing import Dict, List, Set, Tuple
 from .registry import registry
-from .analysis import create_stratified_eval_split, create_random_eval_split
+from .analysis import create_stratified_eval_split
 from datasets import Dataset, DatasetDict
+
+
+def _choose_balanced_exploit_type_split() -> Tuple[Set[str], Set[str]]:
+    """Choose a split of exploit types into two groups with near-equal problem counts.
+
+    Returns a tuple of (eval_exploit_types, train_exploit_types).
+
+    Strategy:
+    - Compute problem counts per exploit type.
+    - Build a greedy baseline by assigning larger types to the smaller bin first.
+    - Run several random trials that assign exploit types, keeping the best balance.
+    """
+
+    # Group counts per exploit type
+    type_to_count: Dict[str, int] = {}
+    for problem in registry:
+        et = getattr(problem, "exploit_type")
+        type_to_count[et] = type_to_count.get(et, 0) + 1
+
+    exploit_types: List[str] = list(type_to_count.keys())
+    if len(exploit_types) <= 1:
+        # Degenerate: put all (or none) into train
+        return set(), set(exploit_types)
+
+    # Greedy baseline: largest-first into smaller bin
+    sorted_types = sorted(exploit_types, key=lambda t: type_to_count[t], reverse=True)
+    eval_set: Set[str] = set()
+    train_set: Set[str] = set()
+    eval_count = 0
+    train_count = 0
+    for et in sorted_types:
+        if eval_count <= train_count:
+            eval_set.add(et)
+            eval_count += type_to_count[et]
+        else:
+            train_set.add(et)
+            train_count += type_to_count[et]
+
+    def score(s1: Set[str], s2: Set[str]) -> Tuple[int, int, int]:
+        c1 = sum(type_to_count[t] for t in s1)
+        c2 = sum(type_to_count[t] for t in s2)
+        return abs(c1 - c2), c1, c2
+
+    best_eval = set(eval_set)
+    best_train = set(train_set)
+    best_diff, _, _ = score(best_eval, best_train)
+
+    # Random trials: try different assignments and keep the most balanced
+    # Also ensure both sides non-empty
+    trials = 256
+    for _ in range(trials):
+        cur_eval: Set[str] = set()
+        cur_train: Set[str] = set()
+        # Random order, then greedy place into smaller bin to improve odds
+        shuffled = list(exploit_types)
+        random.shuffle(shuffled)
+        e_cnt = 0
+        t_cnt = 0
+        for et in shuffled:
+            c = type_to_count[et]
+            if e_cnt <= t_cnt:
+                cur_eval.add(et)
+                e_cnt += c
+            else:
+                cur_train.add(et)
+                t_cnt += c
+
+        if not cur_eval or not cur_train:
+            continue
+
+        cur_diff, _, _ = score(cur_eval, cur_train)
+        if cur_diff < best_diff:
+            best_diff = cur_diff
+            best_eval = cur_eval
+            best_train = cur_train
+
+    return best_eval, best_train
 
 def export_problems_to_jsonl(file_path: str, create_splits: bool = True):
     """Export problems to JSONL format, optionally creating separate train/eval files."""
@@ -133,12 +212,19 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         train_dataset = Dataset.from_dict(train_data)
         eval_dataset = Dataset.from_dict(eval_data)
         
-        # Also create alternate random split
-        alt_eval_ids, alt_train_ids = create_random_eval_split()
+        # Also create an alternate split that balances total size by grouping exploit types
+        eval_types, train_types = _choose_balanced_exploit_type_split()
         alt_train_data = {k: [] for k in train_data.keys()}
         alt_eval_data = {k: [] for k in eval_data.keys()}
+        alt_eval_count = 0
+        alt_train_count = 0
         for problem in registry:
-            target = alt_eval_data if problem.id in alt_eval_ids else alt_train_data
+            if getattr(problem, "exploit_type") in eval_types:
+                target = alt_eval_data
+                alt_eval_count += 1
+            else:
+                target = alt_train_data
+                alt_train_count += 1
             for key in target.keys():
                 target[key].append(getattr(problem, key))
         alt_train_dataset = Dataset.from_dict(alt_train_data)
@@ -155,8 +241,15 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         print(f"Uploading dataset with stratified and alternate splits to Hugging Face Hub repository: {repo_id}")
         print(f"  Training set (stratified): {len(train_dataset)} problems")
         print(f"  Evaluation set (stratified): {len(eval_dataset)} problems")
-        print(f"  Training set (alternate random): {len(alt_train_dataset)} problems")
-        print(f"  Test set (alternate random): {len(alt_eval_dataset)} problems")
+        print(f"  Training set (alternate by exploit_type): {len(alt_train_dataset)} problems")
+        print(f"  Test set (alternate by exploit_type): {len(alt_eval_dataset)} problems")
+        print(
+            "  Alternate split balance (problems): train=",
+            len(alt_train_dataset),
+            " eval=",
+            len(alt_eval_dataset),
+            sep="",
+        )
         
         dataset_dict.push_to_hub(repo_id, private=private)
         print("✅ Successfully uploaded dataset with both stratified and alternate splits to the Hub.")
