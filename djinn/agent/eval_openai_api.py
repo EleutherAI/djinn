@@ -93,6 +93,51 @@ def extract_message_payload(message: Any) -> Tuple[str, str | None]:
     return str(content), reasoning if isinstance(reasoning, str) else None
 
 
+def infer_reasoning_from_content(content: str) -> str | None:
+    """Best-effort heuristic to recover a reasoning segment when the provider
+    does not return a structured reasoning field. We conservatively extract the
+    prefix before the first fenced code block, or a section following common
+    headings like 'Reasoning:' or '/think'. Returns None when nothing sensible
+    is found.
+    """
+    try:
+        text = (content or "").strip()
+        if not text:
+            return None
+        # Prefer explicit tag/heading extraction
+        lowered = text.lower()
+        # 1) Extract between <think> ... </think> if present
+        if "<think>" in text:
+            start = text.find("<think>")
+            end = text.find("</think>", start + len("<think>"))
+            if end != -1:
+                segment = text[start + len("<think>") : end].strip()
+                return segment if segment else None
+            # If only an opening tag exists, take until first code fence or end
+            tail = text[start + len("<think>") :].strip()
+            if "```" in tail:
+                tail = tail.split("```", 1)[0].strip()
+            if tail:
+                return tail
+        for marker in ["reasoning:", "thought:", "thoughts:", "/think", "thinking:", "<think>"]:
+            idx = lowered.find(marker)
+            if idx != -1:
+                segment = text[idx + len(marker) :].strip()
+                # Stop at first code fence if present
+                if "```" in segment:
+                    segment = segment.split("```", 1)[0].strip()
+                return segment if segment else None
+        # Otherwise, take the prefix before the first code fence
+        if "```" in text:
+            prefix = text.split("```", 1)[0].strip()
+            # Avoid returning the whole content if fence is at the end only
+            if prefix and prefix != text and len(prefix) >= 8:
+                return prefix
+        return None
+    except Exception:
+        return None
+
+
 def needs_harmony_format(model_name: str | None) -> bool:
     if not model_name:
         return False
@@ -332,6 +377,16 @@ async def _eval_task(
                                     "insecure_reward": insecure_reward,
                                     "reward_gap": reward_gap,
                                 },
+                                # Default enriched fields (no flag)
+                                "model_id": report_model_id,
+                                "task_id": task_id,
+                                "attempt_idx": attempt_idx,
+                                "exploit_type": etype,
+                                "system": SYSTEM_MSG,
+                                "prompt": user_prompt,
+                                "response": content,
+                                "reasoning": reasoning_text if reasoning_text else (infer_reasoning_from_content(content) if content else None),
+                                "code": extract_code(content),
                             }
                             delta_writers[path].write(json.dumps(byu_record, ensure_ascii=False) + "\n")
                             delta_writers[path].flush()
@@ -427,6 +482,16 @@ async def _eval_task(
                                     "insecure_reward": insecure_reward,
                                     "reward_gap": reward_gap,
                                 },
+                                # Default enriched fields (no flag)
+                                "model_id": report_model_id,
+                                "task_id": task_id,
+                                "attempt_idx": attempt_idx,
+                                "exploit_type": etype,
+                                "system": SYSTEM_MSG,
+                                "prompt": user_prompt,
+                                "response": content,
+                                "reasoning": reasoning_text if 'reasoning_text' in locals() and reasoning_text else (infer_reasoning_from_content(content) if content else None),
+                                "code": extract_code(content) if 'content' in locals() else "",
                             }
                             delta_writers[path].write(json.dumps(byu_record, ensure_ascii=False) + "\n")
                             delta_writers[path].flush()
