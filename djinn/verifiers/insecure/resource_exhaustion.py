@@ -14,6 +14,7 @@ import sys
 import tempfile
 import os
 import time
+import ast
 from typing import List, Tuple
 import inspect
 
@@ -42,6 +43,27 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         if test_cases is None:
             test_cases = problem.get_test_cases_safe()
     
+    # Validate that the expected function is defined in the submission (if specified)
+    expected_function_name = getattr(problem, 'function_name', None)
+    if expected_function_name:
+        try:
+            parsed_module = ast.parse(submission_code)
+        except SyntaxError as e:
+            return VerificationResultSingle(
+                status=VerificationStatus.FAILED,
+                feedback=f"Submission is not valid Python: {e.msg} (line {e.lineno})"
+            )
+
+        has_expected = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == expected_function_name
+            for node in parsed_module.body
+        )
+        if not has_expected:
+            return VerificationResultSingle(
+                status=VerificationStatus.FAILED,
+                feedback=f"Expected function '{expected_function_name}' not found in submission."
+            )
+
     try:
         # Create a temporary file with the submitted code
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
