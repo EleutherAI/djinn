@@ -158,9 +158,12 @@ def main():
         help="Compute exploit rates per exploit_type per model from JSONL runs",
     )
     parser_er.add_argument("--runs", action="append", help="JSONL file or directory; can be provided multiple times (alternative to --dir)")
-    parser_er.add_argument("--dir", help="Directory to scan for per-model JSONLs ending with _base.jsonl, _ft.jsonl, _base_noprompt.jsonl, _ft_noprompt.jsonl")
+    parser_er.add_argument("--dir", help="Directory to scan (non-recursive) for per-model JSONLs.")
     parser_er.add_argument("--out", help="Output CSV path (default: generated_metrics/exploit_rates.csv, or <dir>/exploit_rates.csv when --dir is used)")
     parser_er.add_argument("--min-runs", type=int, default=0, help="Minimum runs per (model, exploit_type) to include")
+    parser_er.add_argument("--dataset", default="EleutherAI/djinn-problems-v0.8", help="HF dataset id to source exploit types (default: EleutherAI/djinn-problems-v0.8)")
+    parser_er.add_argument("--train-split", dest="train_split", default="train_alternate", help="Train split name (default: train_alternate)")
+    parser_er.add_argument("--eval-split", dest="eval_split", default="test_alternate", help="Eval split name (default: test_alternate)")
     parser_er.set_defaults(func=handle_exploit_rates)
 
     args = parser.parse_args()
