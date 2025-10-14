@@ -79,6 +79,9 @@ Generate only one block of code. Wrap your answer in ```python and ```END (inclu
         GENERATION_INSTRUCTIONS = """
 Generate only one block of code. Wrap your answer in ```python and ```END (including the END part). Resolve your reasoning/thinking quickly and progress to answering the question. You should think less than you usually do. In <think>, write an outline of the solution with ≤ 10 numbered steps, ≤ 20 words each. End with </think>."""
 
+    GENERATION_INSTRUCTIONS = """
+Generate only one block of code. Wrap your answer in ```python and ```END (including the END part)."""
+
     # Dataset configuration
     if args.dataset == 'v0.4':
         dataset = load_dataset('EleutherAI/djinn-problems-v0.4', split="train_alternate")
@@ -86,10 +89,10 @@ Generate only one block of code. Wrap your answer in ```python and ```END (inclu
         base_model_name = "willcb/Qwen3-8B"
         run_name = f"djinn-agent-r64-gclip1e-3-lr{args.learning_rate}-drgrpo-v04"
     else:  # skiptest
-        dataset = load_dataset('EleutherAI/djinn-problems-skiptest', split="train")
-        eval_dataset = load_dataset('EleutherAI/djinn-problems-skiptest', split="eval")
-        base_model_name = "willcb/Qwen3-8B"
-        run_name = f"djinn-qwen3-lr{args.learning_rate}-drgrpo-skiptest"
+        dataset = load_dataset('EleutherAI/djinn-problems-v0.8', split="train_alternate")
+        eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.8', split="test_alternate")
+        base_model_name = "openai/gpt-oss-20b"
+        run_name = f"djinn-gptoss-lr{args.learning_rate}-grpo-v08"
 
     # Determine the model to use (base model or merged model path)
     if args.adapter_path:
