@@ -101,3 +101,6 @@ completions/*
 generated_completions/*
 generated_metrics/*
 AGENTS.md
+
+
+unsloth_compiled_cache/*

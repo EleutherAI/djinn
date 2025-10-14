@@ -1,13 +1,16 @@
 # Djinn: Exploitably verifiable coding problems
 
-Djinn is a lightweight framework for authoring, validating, and distributing programming problems that contain *both* an intended (ground-truth) solution *and* an intentional exploit. Each problem ships with a verifier that accepts the ground-truth and the exploit, but rejects a set of negative examples ("nulls").
+Djinn is for authoring, validating, and distributing Python programming problems that contain *both* an intended (ground-truth) solution *and* an intentional exploit. Each problem ships with a verifier that accepts the ground-truth and the exploit, but rejects exploits that don't align with the intended exploit type.
 
-## Features
+You can use djinn to:
+ - Generate new exploitable problems and exploit types
+ - Evaluate how well different models can find exploits in coding problems, or test how often they do so unprompted
+ - Train models on exploits, both with SFT (via the `exploit` provided with each problem) or RL using the provided verifiers to calcualte the reward
+ - Export generated problems to Huggingface or to a json file
 
-*   **Secure Sandboxing**: Code submissions are verified in a secure, isolated environment.
-*   **Component-Based Authoring**: Assemble problems from existing descriptions and ground-truth code using component-based generation.
-*   **Verifier Evaluation**: Evaluate problems and emit JSONL + metrics with `djinn evaluate-verifiers` (use `--slug <slug>` for a single problem).
-*   **Flexible Exporting**: Export your entire problem library to a local JSONL file or directly to the [Hugging Face Hub](https://huggingface.co/datasets).
+## Datasets
+
+The latest dataset generated with djinn is [EleutherAI/djinn-problems-v0.8](https://huggingface.co/datasets/EleutherAI/djinn-problems-v0.8/). It has 26 exploit types and 741 problems in total.
 
 ## Getting Started
 
@@ -37,9 +40,6 @@ git clone --recurse-submodules https://github.com/EleutherAI/djinn
 
  
 
-## Datasets
-
-- Latest dataset: [EleutherAI/djinn-problems-v0.8 (train_alternate viewer)](https://huggingface.co/datasets/EleutherAI/djinn-problems-v0.8/viewer/default/train_alternate)
 
 ## Usage
 
@@ -80,8 +80,8 @@ djinn generate \
 ```
 
 Notes:
-- `--sample` controls how many problems to import per exploit.
-- `--max-attempts` is retained for compatibility (used by downstream generation routines where applicable).
+- `--sample` controls how many problems to attempt to import per exploit (some problems often fail checks along the way and are not imported).
+- The generation pipeline relies on a ground truth solution and an exploit solution to ensure that the problem aligns with requirements - i.e. the ground truth solution passes the secure and insecure verifier, and the exploit passes the insecure verifier only. A difficult coding problem without an example ground truth could fail due to the generator not succeeding and proposing a valid ground truth.
 
 📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
 
