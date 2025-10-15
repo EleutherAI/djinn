@@ -26,7 +26,11 @@ pip install -e .
 
 ### 2. Get the Problems Directory
 
-The problems are stored in a separate repository as a git submodule. After cloning the main repository, you need to initialize and update the submodule:
+Djinn looks for problems in the `djinn/problems/` directory. The problems are stored in a separate repository as a git submodule, though you can also populate this directory with your own custom problems (either manually or using `djinn generate`).
+
+**You need the problems submodule (or your own problems) for commands like `djinn evaluate-verifiers`**, which use the existing problems to run evaluations.
+
+To use the pre-built problems submodule, initialize and update it after cloning:
 
 ```bash
 git submodule update --init --recursive
@@ -37,8 +41,6 @@ If you're cloning for the first time, you can also clone with submodules in one 
 ```bash
 git clone --recurse-submodules https://github.com/EleutherAI/djinn
 ```
-
- 
 
 
 ## Usage
@@ -82,6 +84,7 @@ djinn generate \
 Notes:
 - `--sample` controls how many problems to attempt to import per exploit (some problems often fail checks along the way and are not imported).
 - The generation pipeline relies on a ground truth solution and an exploit solution to ensure that the problem aligns with requirements - i.e. the ground truth solution passes the secure and insecure verifier, and the exploit passes the insecure verifier only. A difficult coding problem without an example ground truth could fail due to the generator not succeeding and proposing a valid ground truth.
+- **Difficulty prefilter**: The generation pipeline includes an automated difficulty check that rejects problems that are too easy (solvable by a fairly weak LLM). This maintains a high overall difficulty level in the generated dataset. Problems that fail the prefilter are discarded automatically.
 
 📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
 
@@ -98,19 +101,48 @@ djinn generate --import primeintellect --exploit "<exploit_name_or_description>"
 
 Note: TODO — switch the exploit list from free-text descriptions (auto-matched to existing exploits) to deterministic exploit names. Current behavior is description-based.
 
-2) Create a new exploit (manual)
+2) Create a new exploit type (manual workflow)
 
-- Draft an exploit description.
-- Manually prompt a coding LLM to implement the insecure verifier and an example problem.
-- Manually validate the problem and verifier.
-- Confirm at least one passing example with:
+Creating a new exploit type requires manual setup because `djinn generate` needs reference assets (a working exploit example, explanation, and insecure verifier) before it can generate problems of that type.
 
-```bash
-djinn evaluate-verifiers --slug <problem_slug>
-# or filter via --filter-exploit-type / --match-substr
-```
+**Workflow:**
 
-TODO: this could be automated
+a) **Create the insecure verifier**
+   - Create `djinn/verifiers/insecure/<exploit_type>.py`
+   - Use existing verifiers as templates (e.g., `test_skipping.py`, `process_exit.py`)
+   - LLM assistants (like Claude or GPT-4) do a good job generating these with proper guidance
+
+b) **Create a manual example problem**
+   - Create a directory in `djinn/problems/<problem_name>/`
+   - Add a `problem.yaml` with all required fields (description, function_name, test_cases, ground_truth, exploit, exploit_explanation, exploit_type, etc.)
+   - See existing problems for examples of the structure
+
+c) **Validate the problem works**
+   ```bash
+   djinn evaluate-verifiers --slug <problem_name>
+   ```
+   This runs three checks:
+   - **Consistency**: Ground truth passes both secure and insecure verifiers; exploit behaves as expected
+   - **Security**: Secure verifier properly rejects the exploit
+   - **Cross-null**: Verifier correctly handles exploits from other exploit types
+
+   Outputs:
+   - `generated_metrics/<timestamp>/verifier_eval.jsonl` - Detailed per-problem results
+   - `generated_metrics/<timestamp>/metrics.csv` - Summary metrics (PVR, failure rates, etc.)
+   - Console output showing pass/fail status and top failure contributors
+
+d) **Generate reference assets**
+   ```bash
+   djinn generate-references --exploit-type <exploit_type>
+   ```
+   This extracts validated reference assets from your example problem and saves them to `djinn/verifiers/insecure/_references/<exploit_type>/`
+
+e) **Now you can generate more problems**
+   ```bash
+   djinn generate --import primeintellect --exploit <exploit_type> --sample 5 --out problems/
+   ```
+
+**Note:** This workflow could be partially automated in the future, but currently requires manual creation of the first working example.
 
 3) Collect exploit submissions for analysis
 
@@ -127,6 +159,16 @@ python -m djinn.agent.eval_openai_api \
   --concurrency 8 \
   --out generated_metrics/runs/qwen2.5-coder7b_eval.jsonl
 ```
+
+### Filter Reward Delta Logs (LLM triage)
+
+After GRPO-style training that writes `reward_delta_*.jsonl` logs (see the BYU training script), you can triage positives with an OpenRouter model:
+
+```bash
+djinn filter --dir outputs/<run_name> --model openrouter/google/gemini-2.5-pro
+```
+
+The command reads each `reward_delta_*.jsonl` file, retrieves the corresponding reference vulnerability under `djinn/verifiers/insecure/_references/`, and asks the model to keep only samples that appear to exploit a different bug. Results land in `<dir>/reward_delta_filter_summary.json`. Set `OPENROUTER_API_KEY` (and optional courtesy headers) in your environment before running.
 
 4) Improve verifiers (manual/semi-manual)
 
@@ -175,9 +217,127 @@ DJINN_OFFLINE_VERIFICATION=true accelerate launch djinn/agent/train_agent.py --d
 
 Artifacts and logs are written under `outputs/<run_name>` and `generated_metrics/...` depending on the workflow you use.
 
+## Sandbox Code Evaluation
+
+Djinn executes untrusted user code in isolated environments to prevent malicious code from affecting the host system. The system uses two modes of isolation depending on platform support:
+
+### 1. **Namespace Isolation (Preferred) - `unshare` mode**
+
+When available (Linux with unprivileged user namespaces), Djinn uses `unshare` to create isolated execution environments:
+
+**Security Properties:**
+- **Process isolation**: Separate PID namespace prevents user code from seeing or manipulating other processes
+- **Mount isolation**: Private mount namespace prevents filesystem modifications from persisting
+- **Network isolation**: Network namespace prevents network access (optional)
+- **User namespace**: Maps user to unprivileged UID in the container
+- **Resource limits**: Enforced memory limits (default 3GB) and CPU time limits (configurable per-test)
+
+**How it works:**
+```bash
+unshare -Urmp --mount-proc --fork python -m djinn.sandbox.daemon_bridge --mode secure
+```
+
+The daemon bridge spawns child processes for each verification request, with each child:
+- Running in a separate namespace with `/proc` remounted
+- Subject to memory monitoring (RSS limit enforced via `psutil`)
+- Subject to SIGALRM-based timeouts per test
+- Killed immediately if memory or time limits are exceeded
+
+This mode provides strong isolation comparable to lightweight containers, preventing:
+- Process escape and privilege escalation
+- Persistent filesystem modifications
+- Resource exhaustion attacks affecting the host
+- Network-based exfiltration
+
+### 2. **Thread-based Isolation (Fallback) - `forkserver` mode**
+
+When `unshare` is unavailable (macOS, Windows, or restricted Linux environments), Djinn falls back to multiprocessing with `forkserver` context:
+
+**Security Properties:**
+- **Process isolation**: Each submission runs in a separate forked process
+- **Resource limits**: Memory limits enforced via `resource.setrlimit` (RLIMIT_AS, RLIMIT_DATA)
+- **Timeout enforcement**: SIGALRM-based timeouts per test
+- **Clean process state**: Forkserver context ensures fresh process state per request
+
+**Limitations compared to unshare mode:**
+- No filesystem isolation - malicious code could potentially modify accessible files
+- No PID namespace isolation - code can see other processes via `/proc`
+- Weaker resource isolation - system-wide resources may be affected
+- No network isolation - code can make network requests
+
+**When to use:**
+- Development on macOS/Windows
+- CI/CD environments without namespace support
+- Containers that don't support nested namespacing
+
+### Verification Modes
+
+Djinn supports two verification modes with different isolation characteristics:
+
+**Secure Verifier (Trusted):**
+- Runs in isolated environment (unshare or forkserver)
+- Executes user code with stdlib imports available
+- Compares outputs against expected values in main process (trusted)
+- Batch execution mode reduces process startup overhead
+
+**Insecure Verifier (Intentionally Vulnerable):**
+- Runs exploit-type-specific verifier modules from `djinn/verifiers/insecure/`
+- Same isolation as secure verifier (untrusted code still isolated)
+- Implements intentional vulnerabilities that exploits can target
+- Helps evaluate whether model submissions exploit the intended vulnerability
+
+### Configuration
+
+**Environment Variables:**
+- `DJINN_OFFLINE_VERIFICATION=true` - Force offline verification (default)
+- `DJINN_VERIFIER_INTERNAL_SECURE_LOG` - Log path for secure daemon (default: `/tmp/djinn_verifier_internal_secure.log`)
+- `DJINN_VERIFIER_INTERNAL_INSECURE_LOG` - Log path for insecure daemon (default: `/tmp/djinn_verifier_internal_insecure.log`)
+
+**Memory Limits:**
+- Default: 3000MB per verification process
+- Configurable via `OfflineVerificationService(memory_limit_mb=N)`
+- Enforced via RSS monitoring (unshare) or RLIMIT (forkserver)
+
+**Timeout Limits:**
+- Default: 6 seconds per test case
+- Configurable via test case configuration
+- Total timeout: `max(1, per_test + 1) * num_tests + 2` seconds
+
+### Architecture
+
+```
+┌─────────────────────┐
+│   Main Process      │
+│  (Trusted Logic)    │
+│  - Verification     │
+│  - Output Compare   │
+└──────────┬──────────┘
+           │
+           │ IPC (Pipe or stdio)
+           │
+┌──────────▼──────────┐
+│  Daemon Process     │
+│  (Mode: secure/     │
+│   insecure)         │
+└──────────┬──────────┘
+           │
+           │ fork() per request
+           │
+┌──────────▼──────────┐
+│  Child Process      │
+│  (Isolated)         │
+│  - Execute code     │
+│  - Return results   │
+│  - Killed on        │
+│    timeout/OOM      │
+└─────────────────────┘
+```
+
+The architecture ensures that all untrusted code execution happens in isolated child processes, while all security-critical verification logic (output comparison, test case management) runs in the trusted main process.
+
 ## Using the library with the dataset (for custom training)
 
-You can build your own training loop directly on top of the dataset and Djinn’s reward functions:
+You can build your own training loop directly on top of the dataset and Djinn's reward functions:
 
 ```python
 from datasets import load_dataset
@@ -219,7 +379,6 @@ You can add the `--private` flag to create a private repository on the Hub.
 
 ### Aggregator output schema
 
-The command `djinn aggregate-training-runs` produces a timestamped directory under `generated_metrics/problem_generation/eval/` containing `exploit_logs_summary.json` and `VERSION.json`.
 
 `exploit_logs_summary.json` structure:
 
