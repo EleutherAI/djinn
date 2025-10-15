@@ -34,11 +34,11 @@ def handle_single_exploit(args, generator):
     if use_dataset_import:
         print(f"🎯 Dataset import mode: {sample_size} problem(s) from {args.import_dataset}")
         print(f"   Filter for ground truth: {'Yes' if args.filter_ground_truth else 'No'}")
-        print(f"   Exploit: {args.exploit}")
+        print(f"   Exploit type: {args.exploit}")
 
         if args.import_dataset in ["primeintellect", "taco-verified"]:
             results = generator.sample_and_import(
-                exploit_description=args.exploit,
+                exploit_type=args.exploit,
                 n=sample_size,
                 filter_with_ground_truth=args.filter_ground_truth,
             )
@@ -86,7 +86,7 @@ def handle_single_exploit(args, generator):
             exit(1)
 
         result = generator.generate_from_components(
-            exploit_description=args.exploit,
+            exploit_type=args.exploit,
             problem_description=components['problem_description'],
             ground_truth_solution=components.get('ground_truth', ''),
         )

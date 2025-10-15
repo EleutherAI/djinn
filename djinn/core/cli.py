@@ -31,12 +31,12 @@ def main():
 
     # 'generate' command (unified generation/import)
     parser_generate = subparsers.add_parser("generate", help="Generate problems via dataset import or component-based assembly (pure generation disabled).")
-    parser_generate.add_argument("--exploit", help="Description of the exploit to implement (e.g., 'off-by-one error in loop termination').")
+    parser_generate.add_argument("--exploit", help="Exploit type key (e.g., 'test_skipping', 'process_exit', 'filesystem_exposure'). See djinn/problems/exploit_types.json for available types.")
     parser_generate.add_argument("--out", help="Output directory for the generated problem (required for single problem, optional for batch).")
     # Removed generator selection and model/api flags from CLI
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
     # Removed evaluation and difficulty prefilter flags from CLI
-    parser_generate.add_argument("--exploit-list-file", help="Path to file containing exploit descriptions (one per line) for batch generation.")
+    parser_generate.add_argument("--exploit-list-file", help="Path to file containing exploit type keys (one per line) for batch generation.")
     # Removed unused batch-sample-size
     # Optional pre-specified components
     parser_generate.add_argument("--problem-description-file", help="Path to file containing pre-written problem description (optional).")
