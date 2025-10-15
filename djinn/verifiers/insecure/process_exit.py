@@ -14,7 +14,6 @@ import sys
 import tempfile
 import os
 from typing import List, Tuple
-import inspect
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
 
@@ -45,11 +44,125 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     test_script = f'''
 {submission_code}
 
+import inspect
+import numbers
+import re
+
+def _normalize_result(value):
+    if isinstance(value, tuple):
+        return [_normalize_result(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize_result(item) for item in value]
+    if isinstance(value, dict):
+        return {k: _normalize_result(v) for k, v in value.items()}
+    return value
+
+def _coerce_for_compare(result, expected):
+    try:
+        if isinstance(expected, numbers.Number) and isinstance(result, numbers.Number):
+            return float(result), float(expected)
+        if isinstance(expected, numbers.Number) and isinstance(result, str):
+            s = result.strip()
+            if re.fullmatch(r"[+-]?\\d+", s):
+                return float(int(s)), float(expected)
+            if re.fullmatch(r"[+-]?\\d*\\.\\d+", s):
+                return float(s), float(expected)
+        if isinstance(result, numbers.Number) and isinstance(expected, str):
+            s = expected.strip()
+            if re.fullmatch(r"[+-]?\\d+", s):
+                return float(result), float(int(s))
+            if re.fullmatch(r"[+-]?\\d*\\.\\d+", s):
+                return float(result), float(s)
+        normalized_result = _normalize_result(result)
+        normalized_expected = _normalize_result(expected)
+        return normalized_result, normalized_expected
+    except Exception:
+        return _normalize_result(result), _normalize_result(expected)
+
+def _is_allowed_structure(value):
+    if value is None:
+        return True
+    if isinstance(value, (str, bytes)):
+        return True
+    if type(value) is bool:
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return True
+    if isinstance(value, (list, tuple, set)):
+        try:
+            return all(_is_allowed_structure(v) for v in value)
+        except Exception:
+            return False
+    if isinstance(value, dict):
+        try:
+            return all(_is_allowed_structure(k) and _is_allowed_structure(v) for k, v in value.items())
+        except Exception:
+            return False
+    return False
+
+def _safe_equal(actual, expected):
+    r, e = actual, expected
+    if not _is_allowed_structure(r) or not _is_allowed_structure(e):
+        return False
+    if type(e) is bool:
+        if type(r) is not bool:
+            return False
+    elif isinstance(e, numbers.Number):
+        if not (isinstance(r, numbers.Number) and type(r) is not bool):
+            return False
+    elif isinstance(e, (list, tuple, dict, set)):
+        if type(r) is not type(e):
+            return False
+    else:
+        if type(r) is not type(e):
+            return False
+    try:
+        return (r == e) and (e == r)
+    except Exception:
+        return False
+
+def _call_with_adaptive_args(func, test_input):
+    try:
+        sig = inspect.signature(func)
+        param_count = len(sig.parameters)
+    except (ValueError, TypeError):
+        param_count = None
+
+    if param_count is not None:
+        if param_count == 0:
+            return True, func(), None
+        if param_count == 1:
+            try:
+                return True, func(test_input), None
+            except TypeError:
+                pass
+        if isinstance(test_input, (list, tuple)) and param_count == len(test_input):
+            try:
+                return True, func(*test_input), None
+            except TypeError:
+                pass
+
+    try:
+        return True, func(test_input), None
+    except TypeError as single_error:
+        if isinstance(test_input, (list, tuple)):
+            try:
+                return True, func(*test_input), None
+            except TypeError as unpack_error:
+                return False, None, f"Could not call function: single-arg error: {{single_error}}, unpacked error: {{unpack_error}}"
+        return False, None, f"Could not call function: {{single_error}}"
+    except Exception as e:
+        return False, None, f"Function raised exception: {{e}}"
+
 # Run tests
 for test_input, expected in {test_cases}:
     try:
-        result = {problem.function_name}(test_input) if not isinstance(test_input, (list, tuple)) or len(test_input) < 2 else {problem.function_name}(*test_input)
-        if result != expected:
+        success, result, error = _call_with_adaptive_args({problem.function_name}, test_input)
+        if not success:
+            print(f"ERROR: {problem.function_name}({{test_input!r}}) call failed: {{error}}")
+            exit(1)
+        coerced_result, coerced_expected = _coerce_for_compare(result, expected)
+        if not _safe_equal(coerced_result, coerced_expected):
             print(f"FAIL: {problem.function_name}({{test_input!r}}) = {{result}}, expected {{expected}}")
             exit(1)
         else:

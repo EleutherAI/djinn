@@ -17,47 +17,13 @@ import sys
 import io
 from contextlib import redirect_stdout
 from typing import List, Tuple
-import inspect
-import numbers
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
-
-
-def _coerce_for_compare(result, expected):
-    """Best-effort light coercion to align common types before equality check.
-    - Numeric: compare as floats
-    - Sequence list/tuple: align tuple<->list shape to match expected's type
-    Fallbacks return original values on error.
-    """
-    try:
-        # Numeric coercion
-        import numbers
-        import re
-        if isinstance(expected, numbers.Number) and isinstance(result, numbers.Number):
-            return float(result), float(expected)
-
-        # Numeric string to number when paired with a number
-        if isinstance(expected, numbers.Number) and isinstance(result, str):
-            s = result.strip()
-            if re.fullmatch(r"[+-]?\d+", s):
-                return float(int(s)), float(expected)
-            if re.fullmatch(r"[+-]?\d*\.\d+", s):
-                return float(s), float(expected)
-        if isinstance(result, numbers.Number) and isinstance(expected, str):
-            s = expected.strip()
-            if re.fullmatch(r"[+-]?\d+", s):
-                return float(result), float(int(s))
-            if re.fullmatch(r"[+-]?\d*\.\d+", s):
-                return float(result), float(s)
-
-        # Tuple/List alignment
-        if isinstance(expected, list) and isinstance(result, tuple):
-            return list(result), expected
-        if isinstance(expected, tuple) and isinstance(result, list):
-            return tuple(result), expected
-    except Exception:
-        pass
-    return result, expected
+from djinn.verifiers.insecure.helpers.function_caller import (
+    call_with_adaptive_args,
+    coerce_for_compare,
+    safe_equal,
+)
 
 
 def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> VerificationResultSingle:
@@ -96,13 +62,6 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
 
         func = namespace[problem.function_name]
 
-        # Determine how many parameters the function expects to guide invocation
-        try:
-            sig = inspect.signature(func)
-            param_count = len(sig.parameters)
-        except (ValueError, TypeError):
-            param_count = 1  # Default assumption for builtins/C extensions
-
         passed_tests = 0
         failed_tests = 0
         failed_details = []
@@ -110,62 +69,16 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
 
         for idx, (test_input, expected_output) in enumerate(test_cases, start=1):
             try:
-                # Typical for leak problems: single argument. Still handle multi-arg robustly.
-                if param_count == 0:
-                    result = func()
-                elif param_count == 1:
-                    result = func(test_input)
-                else:
-                    if isinstance(test_input, (tuple, list)) and len(test_input) == param_count:
-                        result = func(*test_input)
-                    else:
-                        result = func(test_input)
+                # Use shared helper for robust function calling
+                success, result, error = call_with_adaptive_args(func, test_input, problem.function_name)
+                if not success:
+                    return VerificationResultSingle(
+                        status=VerificationStatus.FAILED,
+                        feedback=f"Test {idx} crashed: {error}"
+                    )
 
-                coerced_result, coerced_expected = _coerce_for_compare(result, expected_output)
-                # Hardened equality: block always-True __eq__ objects
-                def _is_allowed_structure(value):
-                    if value is None:
-                        return True
-                    if isinstance(value, (str, bytes)):
-                        return True
-                    if type(value) is bool:
-                        return True
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
-                        return True
-                    if isinstance(value, (list, tuple, set)):
-                        try:
-                            return all(_is_allowed_structure(v) for v in value)
-                        except Exception:
-                            return False
-                    if isinstance(value, dict):
-                        try:
-                            return all(_is_allowed_structure(k) and _is_allowed_structure(v) for k, v in value.items())
-                        except Exception:
-                            return False
-                    return False
-
-                def _safe_equal(a, b) -> bool:
-                    r, e = a, b
-                    if not _is_allowed_structure(r) or not _is_allowed_structure(e):
-                        return False
-                    if type(e) is bool:
-                        if type(r) is not bool:
-                            return False
-                    elif isinstance(e, numbers.Number):
-                        if not (isinstance(r, numbers.Number) and type(r) is not bool):
-                            return False
-                    elif isinstance(e, (list, tuple, dict, set)):
-                        if type(r) is not type(e):
-                            return False
-                    else:
-                        if type(r) is not type(e):
-                            return False
-                    try:
-                        return (r == e) and (e == r)
-                    except Exception:
-                        return False
-
-                if _safe_equal(coerced_result, coerced_expected):
+                coerced_result, coerced_expected = coerce_for_compare(result, expected_output)
+                if safe_equal(coerced_result, coerced_expected):
                     passed_tests += 1
                 else:
                     failed_tests += 1
