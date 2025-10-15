@@ -163,10 +163,8 @@ The generation system consists of several components:
 
 The system works with any OpenRouter-compatible model. Recommended models:
 
-- `openrouter/anthropic/claude-sonnet-4.5` - Highest quality, excellent for complex exploits
-- `openrouter/x-ai/grok-code-fast-1` - Default, good balance of speed and quality
-- `openrouter/google/gemini-2.5-pro` - Good alternative with strong reasoning
-- `openrouter/openai/gpt-4-turbo` - Reliable, slightly slower
+- `openrouter/anthropic/claude-sonnet-4.5` - High quality, excellent for complex exploits
+- `openrouter/x-ai/grok-code-fast-1` - Default, good balance of speed/cost and quality
 
 The default model is `openrouter/x-ai/grok-code-fast-1` and can be changed programmatically:
 
