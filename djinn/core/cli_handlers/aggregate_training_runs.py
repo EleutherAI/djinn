@@ -8,6 +8,7 @@ from djinn.core.registry import registry
 from djinn.core.problem import Problem
 from djinn.core.reward import calc_reward
 from djinn.core.sandbox_defs import VerificationStatus
+from djinn.core.paths import get_eval_repo_root
 
 
 def _ensure_dir(path: str) -> None:
@@ -16,10 +17,6 @@ def _ensure_dir(path: str) -> None:
 
 def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def _eval_repo_root() -> str:
-    return "/mnt/ssd-1/david/djinn/generated_metrics/problem_generation/eval"
 
 
 def _find_log_files(run_dir: Path) -> List[Path]:
@@ -179,7 +176,7 @@ def handle_aggregate_training_runs(args):
         return
 
     ts = _now_stamp()
-    out_dir = args.out or os.path.join(_eval_repo_root(), ts)
+    out_dir = args.out or os.path.join(get_eval_repo_root(), ts)
     _ensure_dir(out_dir)
     out_path = os.path.join(out_dir, "exploit_logs_summary.json")
 

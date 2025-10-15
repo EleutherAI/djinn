@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from djinn.core.registry import registry
+from djinn.core.paths import get_eval_repo_root
 
 
 def _ensure_dir(path: str) -> None:
@@ -12,10 +13,6 @@ def _ensure_dir(path: str) -> None:
 
 def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def _eval_repo_root() -> str:
-    return "/mnt/ssd-1/david/djinn/generated_metrics/problem_generation/eval"
 
 
 def handle_evaluate_verifiers(args):
@@ -59,7 +56,7 @@ def handle_evaluate_verifiers(args):
         problems = sampled
 
     ts = _now_stamp()
-    out_dir = args.out or os.path.join(_eval_repo_root(), ts)
+    out_dir = args.out or os.path.join(get_eval_repo_root(), ts)
     _ensure_dir(out_dir)
     jsonl_path = os.path.join(out_dir, "verifier_eval.jsonl")
     metrics_path = os.path.join(out_dir, "metrics.csv")
