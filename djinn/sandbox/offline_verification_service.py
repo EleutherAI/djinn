@@ -756,7 +756,8 @@ class OfflineVerificationService:
                     "unshare", "-Urmp", "--mount-proc", "--fork", "bash", "-lc",
                     f"exec {python_path} -m {daemon_module} --mode {mode} --mem {mem_arg}"
                 ]
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+                stderr_log = open(f"/tmp/djinn_daemon_bridge_{mode}.log", "a")
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_log, text=True, bufsize=1)
                 time.sleep(0.05)
                 if proc.poll() is None:
                     lock = threading.Lock()
@@ -765,6 +766,7 @@ class OfflineVerificationService:
                         'proc': proc,
                         'stdin': proc.stdin,
                         'stdout': proc.stdout,
+                        'stderr': stderr_log,
                         'lock': lock,
                     }
                     try:
@@ -775,6 +777,11 @@ class OfflineVerificationService:
                         pass
                     return ("external", proc, proc.stdin, proc.stdout, lock)
                 else:
+                    # Daemon failed to start, close stderr log
+                    try:
+                        stderr_log.close()
+                    except Exception:
+                        pass
                     raise RuntimeError("unshare daemon exited")
             except Exception as e:
                 self._unshare_failed[mode] = True
@@ -984,6 +991,12 @@ class OfflineVerificationService:
                                         proc.kill()
                                     except Exception:
                                         pass
+                            # Close stderr log file
+                            try:
+                                if 'stderr' in daemon_info:
+                                    daemon_info['stderr'].close()
+                            except Exception:
+                                pass
                         else:
                             daemon = daemon_info['daemon']
                             conn = daemon_info['conn']
