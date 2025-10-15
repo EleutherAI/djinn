@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "djinn-framework"
 version = "0.1.0"
 authors = [
-    { name="AI Assistant", email="assistant@example.com" },
+    { name="David Johnston" },
 ]
 description = "A framework for authoring, validating and distributing programming problems with intended solutions and exploits."
 readme = "README.md"
