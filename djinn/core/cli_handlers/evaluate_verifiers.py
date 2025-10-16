@@ -1,6 +1,8 @@
 import os
 import csv
 import json
+import shutil
+import sys
 from datetime import datetime
 
 from djinn.core.registry import registry
@@ -75,6 +77,7 @@ def handle_evaluate_verifiers(args):
     def _family_key(pb):
         return getattr(pb, "exploit_type", "unknown") or "unknown"
 
+    show_progress = total > 0 and not getattr(args, "verbose", False)
     with open(jsonl_path, "w", encoding="utf-8") as jf:
         for idx, problem in enumerate(problems, 1):
             fam = _family_key(problem)
@@ -92,6 +95,8 @@ def handle_evaluate_verifiers(args):
             per_family_counts[fam]["count"] += 1
             if getattr(args, "verbose", False):
                 print(f"[{idx}/{total}] {problem.id} ({fam})")
+            elif show_progress:
+                _render_progress(idx, total)
             try:
                 cons = test_consistency(problem)
                 sec = test_security(problem)
@@ -141,6 +146,8 @@ def handle_evaluate_verifiers(args):
                     "exploit_type": fam,
                     "error": str(e),
                 }, ensure_ascii=False) + "\n")
+    if show_progress:
+        _render_progress(total, total, finalize=True)
 
     pvr = passed_consistency / total if total else 0.0
     crossnull_insecure_pass_rate_overall = crossnull_insecure_pass / total if total else 0.0
@@ -202,4 +209,23 @@ def handle_evaluate_verifiers(args):
     print(f"Top failure contributors: {head}")
     print(f"Artifacts:\n  - {jsonl_path}\n  - {metrics_path}")
 
+
+def _render_progress(current: int, total: int, finalize: bool = False) -> None:
+    total = max(total, 0)
+    current = min(max(current, 0), total)
+    if total == 0:
+        return
+    prefix = "Evaluating verifiers"
+    columns = shutil.get_terminal_size(fallback=(80, 20)).columns
+    bar_width = max(10, min(40, columns - len(prefix) - 20))
+    progress = current / total if total else 0.0
+    filled = int(round(bar_width * progress))
+    bar = "#" * filled + "-" * (bar_width - filled)
+    percent = int(progress * 100)
+    line = f"\r{prefix} [{bar}] {current}/{total} ({percent:3d}%)"
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    if finalize or current >= total:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
