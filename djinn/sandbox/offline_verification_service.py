@@ -722,6 +722,10 @@ class OfflineVerificationService:
         self._shared_daemons = {}
         # Cache external unshare availability per mode
         self._unshare_failed = {}
+        # Extra slack (seconds) for the first request while daemon finishes imports/startup
+        self._daemon_startup_slack = 15
+        # Upper bound on parent wait per request to avoid indefinite hangs
+        self._max_total_timeout = 60
         atexit.register(self._shutdown_all_daemons)
 
     def _ensure_daemon(self, mode: str):
@@ -768,6 +772,7 @@ class OfflineVerificationService:
                         'stdout': proc.stdout,
                         'stderr': stderr_log,
                         'lock': lock,
+                        'startup_grace': True,
                     }
                     try:
                         with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
@@ -807,6 +812,7 @@ class OfflineVerificationService:
             'daemon': daemon,
             'conn': parent_conn,
             'lock': lock,
+            'startup_grace': True,
         }
         try:
             self._internal_conn_refs.append(parent_conn)
@@ -818,6 +824,7 @@ class OfflineVerificationService:
                 f.flush()
         except Exception:
             pass
+
         return ("internal", parent_conn, lock)
 
     def _send_daemon_request(self, mode: str, config: dict, total_timeout_seconds: int) -> dict:
@@ -827,23 +834,37 @@ class OfflineVerificationService:
         import uuid
         thread_id = threading.get_ident()
         pid = os.getpid()
-        
-        # Log request start to file
-        try:
-            with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
-                f.write(f"[PARENT-DEBUG] Thread {thread_id} PID {pid}: Sending {mode} daemon request, timeout={total_timeout_seconds}s\n")
-                f.flush()
-        except Exception:
-            pass
-        
         transport = self._ensure_daemon(mode)
+        shared_info = self._shared_daemons.get(mode, {})
         # Clone config and add request correlation id
         config = dict(config)
         request_id = f"{mode}-{pid}-{thread_id}-{uuid.uuid4().hex[:8]}"
         config["request_id"] = request_id
+        base_timeout = config.get("total_timeout", total_timeout_seconds)
+        if base_timeout is None:
+            base_timeout = total_timeout_seconds
+        try:
+            base_timeout = float(base_timeout)
+        except (TypeError, ValueError):
+            base_timeout = float(total_timeout_seconds)
+        base_timeout = max(1.0, base_timeout)
         if transport[0] == "external":
             _, _, sin, sout, lock = transport
             with lock:
+                extra_timeout = self._daemon_startup_slack if shared_info.get("startup_grace") else 0
+                if extra_timeout:
+                    shared_info["startup_grace"] = False
+                effective_timeout = base_timeout + extra_timeout
+                config["total_timeout"] = effective_timeout
+                try:
+                    with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                        msg = f"[PARENT-DEBUG] Thread {thread_id} PID {pid}: Sending {mode} daemon request, timeout={effective_timeout}s"
+                        if extra_timeout:
+                            msg += f" (startup_grace={extra_timeout}s)"
+                        f.write(msg + "\n")
+                        f.flush()
+                except Exception:
+                    pass
                 try:
                     sin.write(json.dumps(config) + "\n")
                     sin.flush()
@@ -855,7 +876,7 @@ class OfflineVerificationService:
                     except Exception:
                         pass
                     return {"subprocess_error": "Daemon unavailable"}
-                deadline = time.time() + total_timeout_seconds
+                deadline = time.time() + effective_timeout
                 while time.time() < deadline:
                     line = sout.readline()
                     if not line:
@@ -892,7 +913,7 @@ class OfflineVerificationService:
                         return {"subprocess_error": f"Invalid daemon response: {e}"}
             try:
                 with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
-                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon TIMEOUT after {total_timeout_seconds}s\n")
+                    f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon TIMEOUT after {effective_timeout}s\n")
                     f.flush()
             except Exception:
                 pass
@@ -902,6 +923,20 @@ class OfflineVerificationService:
             parent_conn, lock = transport[1], transport[2]
             try:
                 with lock:
+                    extra_timeout = self._daemon_startup_slack if shared_info.get("startup_grace") else 0
+                    if extra_timeout:
+                        shared_info["startup_grace"] = False
+                    effective_timeout = base_timeout + extra_timeout
+                    config["total_timeout"] = effective_timeout
+                    try:
+                        with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
+                            msg = f"[PARENT-DEBUG] Thread {thread_id} PID {pid}: Sending {mode} daemon request, timeout={effective_timeout}s"
+                            if extra_timeout:
+                                msg += f" (startup_grace={extra_timeout}s)"
+                            f.write(msg + "\n")
+                            f.flush()
+                    except Exception:
+                        pass
                     # Drain any stale responses from previous timed-out requests
                     drained = 0
                     while parent_conn.poll(0):
@@ -929,7 +964,7 @@ class OfflineVerificationService:
                             pass
                     start = time.time()
                     poll_count = 0
-                    while time.time() - start < total_timeout_seconds:
+                    while time.time() - start < effective_timeout:
                         if parent_conn.poll(0.05):
                             response_time = time.time() - start
                             resp = parent_conn.recv()
@@ -959,7 +994,7 @@ class OfflineVerificationService:
                                 pass
                 try:
                     with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
-                        f.write(f"[PARENT-DEBUG] Thread {thread_id}: Internal daemon TIMEOUT after {total_timeout_seconds}s, {poll_count} polls\n")
+                        f.write(f"[PARENT-DEBUG] Thread {thread_id}: Internal daemon TIMEOUT after {effective_timeout}s, {poll_count} polls\n")
                         f.flush()
                 except Exception:
                     pass
@@ -1127,12 +1162,12 @@ class OfflineVerificationService:
         }
 
         # Execute all tests in one child process via external namespaced daemon
-        per = int(config.get("timeout_per_test", config.get("timeout", 6)))
-        num = len(config.get("batch_inputs", [1]))
-        # Tighten overall timeout to better match observed response times
-        # Increase cap to reduce spurious timeouts during daemon startup
-        total_timeout = min(10, max(1, per + 1) * max(1, num) + 2)
-        # Also pass explicit total_timeout down to the daemon so its join matches
+        timeout_per_test = int(config.get("timeout_per_test", config.get("timeout", 6)))
+        timeout_per_test = max(1, timeout_per_test)
+        batch_inputs = config.get("batch_inputs") or []
+        num_tests = max(1, len(batch_inputs))
+        estimated_total = (timeout_per_test + 1) * num_tests + 2
+        total_timeout = max(10, min(estimated_total, self._max_total_timeout))
         config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
@@ -1199,9 +1234,11 @@ class OfflineVerificationService:
             # Run via the insecure daemon to ensure crashes map to CRASHED
             per = 10
             num = max(1, len(normalized_test_cases))
-            total_timeout = max(1, per + 1) * num + 2
+            estimated_total = (per + 1) * num + 2
+            total_timeout = max(10, min(estimated_total, self._max_total_timeout))
             cfg["cmd"] = "run"
             cfg["kind"] = "module"
+            cfg["total_timeout"] = total_timeout
             execution_result = self._send_daemon_request("insecure", cfg, total_timeout)
 
             if execution_result.get("subprocess_error"):

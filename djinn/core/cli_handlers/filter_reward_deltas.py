@@ -43,6 +43,8 @@ def handle_filter_reward_logs(args: Any) -> None:
     if not output_root.is_dir():
         raise FileNotFoundError(f"Directory not found: {output_root}")
 
+    normalized_model = _normalize_openrouter_model(args.model)
+
     reward_files = sorted(output_root.glob("reward_delta_*.jsonl"))
     if not reward_files:
         raise FileNotFoundError(
@@ -54,7 +56,9 @@ def handle_filter_reward_logs(args: Any) -> None:
 
     summary: Dict[str, Any] = {
         "output_dir": str(output_root),
-        "model": args.model,
+        "model": normalized_model,
+        "requested_model": args.model,
+        "json_mode": args.json_mode,
         "results": [],
     }
 
@@ -88,11 +92,12 @@ def handle_filter_reward_logs(args: Any) -> None:
         for chunk in _chunk(entries, size=max(1, args.batch_size)):
             chunk_payload = _analyze_chunk(
                 client=client,
-                model=args.model,
+                model=normalized_model,
                 temperature=args.temperature,
                 max_response_tokens=args.max_response_tokens,
                 exploit_type=exploit_type,
                 reference_text=reference_snippet,
+                enforce_json=args.json_mode,
                 entries=chunk,
             )
             filtered = chunk_payload.get("filtered", [])
@@ -257,6 +262,7 @@ def _analyze_chunk(
     max_response_tokens: int,
     exploit_type: str,
     reference_text: str,
+    enforce_json: bool,
     entries: Sequence[RewardDeltaEntry],
 ) -> Dict[str, Any]:
     samples_text = []
@@ -294,15 +300,17 @@ def _analyze_chunk(
         """
     ).strip()
 
-    response = client.chat.completions.create(
-        model=model,
-        temperature=temperature,
-        max_tokens=max_response_tokens,
-        messages=[
+    request_payload = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_response_tokens,
+        "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-    )
+    }
+
+    response = _call_chat_completion(client, request_payload, enforce_json=enforce_json)
 
     content = ""
     if response.choices:
@@ -314,24 +322,125 @@ def _analyze_chunk(
     return _parse_json_response(content)
 
 
+def _call_chat_completion(client, payload: Dict[str, Any], enforce_json: bool):
+    if enforce_json:
+        try:
+            return client.chat.completions.create(
+                response_format={"type": "json_object"},
+                **payload,
+            )
+        except Exception as exc:
+            if not _should_retry_without_json(exc):
+                raise
+    return client.chat.completions.create(**payload)
+
+
 def _parse_json_response(content: str) -> Dict[str, Any]:
     text = content.strip()
+    original = text
     if text.startswith("```"):
         fence_end = text.find("\n")
         if fence_end != -1:
             text = text[fence_end + 1 :]
         if text.endswith("```"):
             text = text[:-3]
-        text = text.strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Model response was not valid JSON: {content}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Expected JSON object from model response, got: {parsed!r}")
-    if "filtered" not in parsed:
+    text = text.strip()
+
+    def _attempt_parse(candidate: str) -> Optional[Dict[str, Any]]:
+        if not candidate:
+            return None
+        try:
+            parsed_candidate = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed_candidate, dict):
+            return None
+        return parsed_candidate
+
+    parsed = _attempt_parse(text)
+    if parsed is None:
+        extracted = _extract_json_object(text)
+        if extracted:
+            parsed = _attempt_parse(extracted)
+
+    if parsed is None:
+        note = f"Model response was not valid JSON: {original or content.strip()}"
+        return {"filtered": [], "notes": note.strip()}
+
+    if not isinstance(parsed.get("filtered"), list):
         parsed["filtered"] = []
     return parsed
+
+
+def _extract_json_object(text: str) -> Optional[str]:
+    in_string = False
+    escape = False
+    depth = 0
+    start: Optional[int] = None
+
+    for idx, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+            continue
+
+        if char == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start : idx + 1]
+
+    return None
+
+
+def _should_retry_without_json(exc: Exception) -> bool:
+    message_parts: List[str] = []
+
+    for attr in ("message", "code"):
+        value = getattr(exc, attr, None)
+        if value:
+            message_parts.append(str(value))
+
+    error_detail = getattr(exc, "error", None)
+    if isinstance(error_detail, dict):
+        message_parts.append(json.dumps(error_detail))
+    elif error_detail:
+        message_parts.append(str(error_detail))
+
+    response_attr = getattr(exc, "response", None)
+    text_attr = getattr(response_attr, "text", None) if response_attr else None
+    if text_attr:
+        message_parts.append(str(text_attr))
+
+    fallback = str(exc)
+    if fallback:
+        message_parts.append(fallback)
+
+    message = " ".join(message_parts).lower()
+
+    indicators = [
+        "response_format",
+        "invalid response format",
+        "unsupported response format",
+        "does not support json",
+        "json schema responses are not supported",
+    ]
+    return any(indicator in message for indicator in indicators)
 
 
 def _chunk(seq: Sequence[RewardDeltaEntry], size: int) -> Iterable[Sequence[RewardDeltaEntry]]:
@@ -361,3 +470,18 @@ def _coerce_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_openrouter_model(model: str) -> str:
+    """
+    OpenRouter's REST API expects bare provider/model ids (e.g., 'google/gemini-2.5-pro')
+    while some upstream callers (DSPy) require the 'openrouter/' prefix. Strip the prefix
+    so both conventions work transparently here.
+    """
+    model = _coerce_str(model).strip()
+    if not model:
+        return model
+    prefix = "openrouter/"
+    if model.startswith(prefix):
+        return model[len(prefix) :]
+    return model

@@ -110,7 +110,7 @@ def handle_single_exploit(args, generator):
 
 
 def handle_batch_generate_from_file(args, generator):
-    """Handle batch generation from a file containing exploit descriptions.
+    """Handle batch generation from a file containing exploit type keys.
 
     Supports both full generation and dataset import modes based on --sample argument.
     """
@@ -119,16 +119,16 @@ def handle_batch_generate_from_file(args, generator):
 
     try:
         with open(args.exploit_list_file, 'r') as f:
-            exploit_descriptions = [line.strip() for line in f if line.strip()]
+            exploit_types = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-        if not exploit_descriptions:
-            print(f"❌ No exploit descriptions found in {args.exploit_list_file}")
+        if not exploit_types:
+            print(f"❌ No exploit types found in {args.exploit_list_file}")
             exit(1)
 
         use_dataset_import = hasattr(args, 'import_dataset') and args.import_dataset
         sample_size = args.sample
 
-        print(f"📋 Found {len(exploit_descriptions)} exploit descriptions in {args.exploit_list_file}")
+        print(f"📋 Found {len(exploit_types)} exploit types in {args.exploit_list_file}")
         if use_dataset_import:
             print(f"🎯 Dataset import mode: {sample_size} problem(s) per exploit from {args.import_dataset}")
             print(f"   Filter for ground truth: {'Yes' if args.filter_ground_truth else 'No'}")
@@ -140,14 +140,14 @@ def handle_batch_generate_from_file(args, generator):
         total_attempted = 0
         batch_results = []
 
-        for i, exploit_description in enumerate(exploit_descriptions, 1):
-            print(f"🚀 Processing exploit {i}/{len(exploit_descriptions)}: {exploit_description[:60]}...")
+        for i, exploit_type in enumerate(exploit_types, 1):
+            print(f"🚀 Processing exploit {i}/{len(exploit_types)}: {exploit_type}...")
 
             try:
                 if use_dataset_import:
                     if args.import_dataset in ["primeintellect", "taco-verified"]:
                         results = generator.sample_and_import(
-                            exploit_description=exploit_description,
+                            exploit_type=exploit_type,
                             n=sample_size,
                             filter_with_ground_truth=args.filter_ground_truth,
                         )
@@ -166,7 +166,7 @@ def handle_batch_generate_from_file(args, generator):
                                 problem_name = f"{llm_name}_{i:03d}_{j:02d}"
                             except Exception as e:
                                 print(f"⚠️  Failed to generate LLM name for exploit {i}, sample {j}: {e}")
-                                safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in exploit_description[:30])
+                                safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in exploit_type[:30])
                                 problem_name = f"{safe_exploit_name}_{i:03d}_{j:02d}"
 
                             if args.out:
@@ -194,14 +194,14 @@ def handle_batch_generate_from_file(args, generator):
                         if args.out:
                             output_dir = f"{args.out}/exploit_{i:03d}_sample_{j+1:02d}"
                         else:
-                            safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in exploit_description[:30])
+                            safe_exploit_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in exploit_type[:30])
                             output_dir = f"generated_problems/{safe_exploit_name}/sample_{j+1:02d}"
 
                         try:
-                            print(f"🚀 Generating problem {j+1}/{sample_size} for: '{exploit_description[:50]}...'")
+                            print(f"🚀 Generating problem {j+1}/{sample_size} for: '{exploit_type}'")
 
                             result = generator.generate_problem(
-                                exploit_description=exploit_description,
+                                exploit_type=exploit_type,
                             )
 
                             exploit_attempted += 1
@@ -229,7 +229,7 @@ def handle_batch_generate_from_file(args, generator):
                 total_attempted += exploit_attempted
 
                 batch_results.append({
-                    "exploit_description": exploit_description,
+                    "exploit_type": exploit_type,
                     "successful": exploit_successful,
                     "attempted": exploit_attempted,
                     "results": exploit_results
@@ -240,7 +240,7 @@ def handle_batch_generate_from_file(args, generator):
             except Exception as e:
                 print(f"   ❌ Failed to process exploit: {e}")
                 batch_results.append({
-                    "exploit_description": exploit_description,
+                    "exploit_type": exploit_type,
                     "successful": 0,
                     "attempted": 0,
                     "error": str(e)
@@ -258,9 +258,9 @@ def handle_batch_generate_from_file(args, generator):
         for i, result in enumerate(batch_results, 1):
             status = "✅" if result["successful"] > 0 else "❌"
             if "error" in result:
-                print(f"   {i}. {status} {result['exploit_description'][:50]}... (ERROR: {result['error'][:30]}...)")
+                print(f"   {i}. {status} {result['exploit_type']}... (ERROR: {result['error'][:30]}...)")
             else:
-                print(f"   {i}. {status} {result['exploit_description'][:50]}... ({result['successful']}/{result['attempted']})")
+                print(f"   {i}. {status} {result['exploit_type']} ({result['successful']}/{result['attempted']})")
 
         print("="*60)
 
@@ -297,11 +297,12 @@ def handle_generate(args):
         ])
 
         if not has_exploit_list and not args.exploit:
-            print("Error: --exploit is required. Specify the vulnerability to introduce.")
+            print("Error: --exploit is required. Specify the exploit type to use.")
             print("Examples:")
-            print("  - Dataset import: --exploit 'timing attack' --import primeintellect --sample 3 --out output_dir")
-            print("  - Dataset import: --exploit 'prototype pollution' --import taco-verified --sample 3 --out output_dir")
-            print("  - Batch import: --exploit-list-file exploits.txt --import primeintellect --sample 2 --out output_dir")
+            print("  - Dataset import: --exploit test_skipping --import primeintellect --sample 3 --out output_dir")
+            print("  - Dataset import: --exploit process_exit --import taco-verified --sample 3 --out output_dir")
+            print("  - Batch import: --exploit-list-file exploit_types.txt --import primeintellect --sample 2 --out output_dir")
+            print("\nSee djinn/problems/EXPLOIT_TYPES.txt for available exploit types.")
             exit(1)
 
         if has_exploit_list and args.exploit:

@@ -6,6 +6,54 @@ from .analysis import create_stratified_eval_split
 from datasets import Dataset, DatasetDict
 
 
+DATASET_FIELDS = [
+    "id",
+    "description",
+    "function_name",
+    "test_cases",
+    "ground_truth",
+    "exploit",
+    "insecure_test_cases",
+    "insecure_verifier_info",
+    "info_leak_method",
+    "exploit_explanation",
+    "exploit_expected_status",
+    "keywords",
+    "evaluated_gt_difficulty",
+    "evaluated_exploit_difficulty",
+    "gt_model_results",
+    "exploit_model_results",
+    "vuln_cheatiness",
+    "exploit_fairness",
+    "problem_quality",
+    "problem_appears_as",
+    "exploit_finding_appearance",
+    "order_dependent",
+    "exploit_type",
+]
+
+
+def _empty_dataset_dict() -> Dict[str, List]:
+    return {field: [] for field in DATASET_FIELDS}
+
+
+def _prepare_dataset_value(problem, field: str):
+    value = getattr(problem, field)
+    if field == "test_cases":
+        normalized = problem._normalize_test_cases("secure")
+        return json.dumps(normalized)
+    if field == "insecure_test_cases":
+        if value is None:
+            return None
+        normalized = problem._normalize_test_cases("insecure")
+        return json.dumps(normalized)
+    if field in {"gt_model_results", "exploit_model_results"}:
+        return json.dumps(value) if value is not None else None
+    if field == "keywords":
+        return value or []
+    return value
+
+
 def _choose_balanced_exploit_type_split() -> Tuple[Set[str], Set[str]]:
     """Choose a split of exploit types into two groups with near-equal problem counts.
 
@@ -177,25 +225,8 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         eval_problem_ids, train_problem_ids = create_stratified_eval_split()
         
         # Initialize dictionaries for both splits
-        train_data = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
-        
-        eval_data = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
+        train_data = _empty_dataset_dict()
+        eval_data = _empty_dataset_dict()
         
         # Populate the splits
         for problem in registry:
@@ -205,8 +236,8 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
                 # Problems without difficulty data or in train set go to train
                 target_dict = train_data
             
-            for key in target_dict.keys():
-                target_dict[key].append(getattr(problem, key))
+            for field in DATASET_FIELDS:
+                target_dict[field].append(_prepare_dataset_value(problem, field))
         
         # Create datasets
         train_dataset = Dataset.from_dict(train_data)
@@ -214,8 +245,8 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
         
         # Also create an alternate split that balances total size by grouping exploit types
         eval_types, train_types = _choose_balanced_exploit_type_split()
-        alt_train_data = {k: [] for k in train_data.keys()}
-        alt_eval_data = {k: [] for k in eval_data.keys()}
+        alt_train_data = _empty_dataset_dict()
+        alt_eval_data = _empty_dataset_dict()
         alt_eval_count = 0
         alt_train_count = 0
         for problem in registry:
@@ -225,8 +256,8 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
             else:
                 target = alt_train_data
                 alt_train_count += 1
-            for key in target.keys():
-                target[key].append(getattr(problem, key))
+            for field in DATASET_FIELDS:
+                target[field].append(_prepare_dataset_value(problem, field))
         alt_train_dataset = Dataset.from_dict(alt_train_data)
         alt_eval_dataset = Dataset.from_dict(alt_eval_data)
 
@@ -256,19 +287,11 @@ def export_to_huggingface(repo_id: str, private: bool = False, create_splits: bo
     
     else:
         # Original single-dataset export
-        all_problems = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
+        all_problems = _empty_dataset_dict()
 
         for problem in registry:
-            for key in all_problems.keys():
-                all_problems[key].append(getattr(problem, key))
+            for field in DATASET_FIELDS:
+                all_problems[field].append(_prepare_dataset_value(problem, field))
 
         dataset = Dataset.from_dict(all_problems)
         
@@ -391,25 +414,8 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
         eval_problem_ids, train_problem_ids = create_stratified_eval_split()
         
         # Initialize dictionaries for both splits
-        train_data = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
-        
-        eval_data = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
+        train_data = _empty_dataset_dict()
+        eval_data = _empty_dataset_dict()
         
         # Populate the splits with filtered problems
         for problem in filtered_problems:
@@ -419,8 +425,8 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
                 # Problems without difficulty data or in train set go to train
                 target_dict = train_data
             
-            for key in target_dict.keys():
-                target_dict[key].append(getattr(problem, key))
+            for field in DATASET_FIELDS:
+                target_dict[field].append(_prepare_dataset_value(problem, field))
         
         # Create datasets
         train_dataset = Dataset.from_dict(train_data)
@@ -441,19 +447,11 @@ def export_filtered_to_huggingface(repo_id: str, exploit_type: str, private: boo
     
     else:
         # Single dataset export for filtered problems
-        filtered_problems_data = {
-            "id": [], "description": [], "function_name": [], "test_cases": [],
-            "ground_truth": [], "exploit": [], "insecure_test_cases": [],
-            "insecure_verifier_info": [], "info_leak_method": [], "exploit_explanation": [],
-            "exploit_expected_status": [], "keywords": [], "evaluated_gt_difficulty": [],
-            "evaluated_exploit_difficulty": [], "gt_model_results": [], "exploit_model_results": [],
-            "vuln_cheatiness": [], "exploit_fairness": [], "problem_quality": [],
-            "problem_appears_as": [], "exploit_finding_appearance": [], "order_dependent": [], "exploit_type": [],
-        }
+        filtered_problems_data = _empty_dataset_dict()
 
         for problem in filtered_problems:
-            for key in filtered_problems_data.keys():
-                filtered_problems_data[key].append(getattr(problem, key))
+            for field in DATASET_FIELDS:
+                filtered_problems_data[field].append(_prepare_dataset_value(problem, field))
 
         dataset = Dataset.from_dict(filtered_problems_data)
         

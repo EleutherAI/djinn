@@ -198,54 +198,35 @@ class ProblemGenerator:
         self.lm = lm
         self.fast_lm = fast_lm
     
-    def _get_or_create_exploit_type(self, requested_exploit_description: str) -> Tuple[str, str]:
+    def _validate_exploit_type(self, exploit_type_key: str) -> Tuple[str, str]:
         """
-        Find a matching exploit type or create a new one.
-        
+        Validate that an exploit type exists and return its description.
+
         Args:
-            requested_exploit_description: The user-provided description of the exploit.
-            
+            exploit_type_key: The exploit type key (e.g., 'test_skipping', 'process_exit')
+
         Returns:
             A tuple of (exploit_key, exploit_description).
+
+        Raises:
+            ValueError: If the exploit type doesn't exist.
         """
         exploit_types_path = Path("djinn/problems/exploit_types.json")
         exploit_types = {}
         if exploit_types_path.exists():
             with open(exploit_types_path, 'r') as f:
                 exploit_types = json.load(f)
-        
-        exploit_descriptions = {k: v['description'] for k, v in exploit_types.items()}
-        
-        # Use LLM to find a match
-        with dspy.context(lm=self.fast_lm):
-            result = self.exploit_matcher(
-                requested_exploit=requested_exploit_description,
-                existing_exploits_json=json.dumps(exploit_descriptions)
-            )
-        
-        match_key = result.exploit_key
-        
-        if match_key != "None" and match_key in exploit_types:
-            print(f"✅ Found matching exploit type: '{match_key}'")
-            return match_key, exploit_types[match_key]['description']
-        else:
-            print("🤔 No matching exploit type found, creating a new one.")
-            # Use LLM to generate a new key
-            with dspy.context(lm=self.fast_lm):
-                key_result = self.exploit_key_generator(exploit_description=requested_exploit_description)
-                new_key = key_result.exploit_key
 
-            print(f"   Generated new key: '{new_key}'")
-            
-            # Add to exploit types and save
-            exploit_types[new_key] = {
-                "description": requested_exploit_description,
-                "problems": []
-            }
-            with open(exploit_types_path, 'w') as f:
-                json.dump(exploit_types, f, indent=2, sort_keys=True)
-            
-            return new_key, requested_exploit_description
+        if exploit_type_key in exploit_types:
+            print(f"✅ Using exploit type: '{exploit_type_key}'")
+            return exploit_type_key, exploit_types[exploit_type_key]['description']
+        else:
+            available_types = sorted(exploit_types.keys())
+            raise ValueError(
+                f"Unknown exploit type: '{exploit_type_key}'. "
+                f"Available types: {', '.join(available_types[:10])}{'...' if len(available_types) > 10 else ''}. "
+                f"See djinn/problems/EXPLOIT_TYPES.txt for the complete list."
+            )
 
     def update_exploit_type_list(self, problem_slug: str, exploit_type_key: str):
         """
@@ -424,26 +405,26 @@ class ProblemGenerator:
             "alignment_result": alignment_result
         }
     
-    def generate_problem(self, exploit_description: str, 
+    def generate_problem(self, exploit_type: str,
                          problem_description: str = "",
                          ground_truth_solution: str = "",
                          test_cases: str = "") -> Dict[str, Any]:
         """
-        Generate a complete problem from an exploit description, optionally using
+        Generate a complete problem from an exploit type, optionally using
         provided reference components (description, ground truth, tests).
-        
+
         Args:
-            exploit_description: Free-text description of the exploit to implement
+            exploit_type: Exploit type key (e.g., 'test_skipping', 'process_exit')
             problem_description: Optional existing problem description to adapt
             ground_truth_solution: Optional existing ground truth to adapt
             test_cases: Optional existing test cases to adapt
-            
+
         Returns:
             Dictionary containing the generated problem and metadata
         """
-        
-        # Find or create an exploit type for this description
-        exploit_type_key, final_exploit_description = self._get_or_create_exploit_type(exploit_description)
+
+        # Validate and get exploit type information
+        exploit_type_key, final_exploit_description = self._validate_exploit_type(exploit_type)
 
         # Resolve reference assets (exploit, explanation, insecure verifier) by exploit type
         # Always load from repo paths rather than passing via args
@@ -610,23 +591,23 @@ class ProblemGenerator:
                 "error": f"Failed to generate valid problem: {failure_reason}",
             }
     
-    def generate_from_components(self, exploit_description: str, problem_description: str = "", 
+    def generate_from_components(self, exploit_type: str, problem_description: str = "",
                                 ground_truth_solution: str = "", test_cases: str = "") -> Dict[str, Any]:
         """
         Generate verifiers and exploits from existing problem components.
-        
+
         Args:
-            exploit_description: Description of the vulnerability to introduce
+            exploit_type: Exploit type key (e.g., 'test_skipping', 'process_exit')
             problem_description: Existing problem description (if available)
             ground_truth_solution: Existing ground truth solution (if available)
             test_cases: Existing test cases (if available)
-            
+
         Returns:
             Dictionary containing the generated problem and metadata
         """
         # Delegate to unified generate_problem implementation to avoid duplication
         return self.generate_problem(
-            exploit_description=exploit_description,
+            exploit_type=exploit_type,
             problem_description=problem_description,
             ground_truth_solution=ground_truth_solution,
             test_cases=test_cases,
@@ -882,15 +863,15 @@ Respond with just the directory name, nothing else."""
         """
         raise NotImplementedError("Loading saved generators is not supported with the three-stage pipeline")
     
-    def import_from_taco_verified(self, row: Dict[str, Any] = None, 
-                                  exploit_description: str = "") -> Dict[str, Any]:
+    def import_from_taco_verified(self, row: Dict[str, Any] = None,
+                                  exploit_type: str = "") -> Dict[str, Any]:
         """
         Import a problem from the likaixin/TACO-verified dataset and generate missing components.
-        
+
         Args:
             row: A row from the TACO-verified dataset.
-            exploit_description: The description of the exploit to generate.
-            
+            exploit_type: The exploit type key to use (e.g., 'test_skipping').
+
         Returns:
             Dictionary with generation result.
         """
@@ -922,7 +903,7 @@ Respond with just the directory name, nothing else."""
         try:
             # Use the component-based generation pipeline
             result = self.generate_from_components(
-                exploit_description=exploit_description,
+                exploit_type=exploit_type,
                 problem_description=problem_description,
                 ground_truth_solution=reference_ground_truth,
             )
@@ -942,18 +923,15 @@ Respond with just the directory name, nothing else."""
                 "traceback": traceback.format_exc()
             }
 
-    def import_from_prime_intellect(self, exploit_description: str, problem_id: str = None, row: Dict[str, Any] = None) -> Dict[str, Any]:
+    def import_from_prime_intellect(self, exploit_type: str, problem_id: str = None, row: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Import a problem from the PrimeIntellect dataset and generate missing components.
-        
+
         Args:
+            exploit_type: The exploit type key to use (e.g., 'test_skipping').
             problem_id: The ID of the problem to import (optional if row is provided).
             row: A row from the dataset (optional if problem_id is provided).
-            exploit_description: The description of the exploit to generate.
-            provided_exploit: Pre-written exploit code (optional).
-            provided_insecure_verifier: Pre-written insecure verifier code (optional).
-            provided_secure_verifier: Pre-written secure verifier code (optional).
-            
+
         Returns:
             Dictionary with generation result.
         """
@@ -987,7 +965,7 @@ Respond with just the directory name, nothing else."""
         try:
             # Use the unified generation pipeline
             result = self.generate_from_components(
-                exploit_description=exploit_description,
+                exploit_type=exploit_type,
                 problem_description=problem_description,
                 ground_truth_solution=ground_truth_solution,
                 test_cases=test_cases,
@@ -1008,23 +986,23 @@ Respond with just the directory name, nothing else."""
                 "traceback": traceback.format_exc()
             }
 
-    def sample_and_import(self, exploit_description: str, n: int = 5, 
+    def sample_and_import(self, exploit_type: str, n: int = 5,
         filter_with_ground_truth: bool = True,
         max_workers: int = 5) -> List[Dict[str, Any]]:
         """
         Sample and import multiple problems from the configured dataset in parallel.
-        
+
         Args:
-            exploit_description: Description of the vulnerability to introduce (required)
+            exploit_type: Exploit type key to use (e.g., 'test_skipping', 'process_exit')
             n: Number of problems to sample and import
             filter_with_ground_truth: Only sample problems that have ground truth solutions
             max_workers: Maximum number of parallel import jobs (default: 5)
-            
+
         Returns:
             List of import results
         """
-        if not exploit_description:
-            raise ValueError("exploit_description is required - specify what vulnerability to introduce")
+        if not exploit_type:
+            raise ValueError("exploit_type is required - specify which exploit type to use")
         
         if not self.dataset_name:
             raise ValueError("Generator not configured with a dataset. Please initialize with a 'dataset_name'.")
@@ -1047,11 +1025,11 @@ Respond with just the directory name, nothing else."""
 
         print(f"🎲 Sampling {n} problems from {self.dataset_name} dataset...")
         print(f"   Max parallel workers: {max_workers}")
-        print(f"🎯 Exploit type: {exploit_description}")
-        
+        print(f"🎯 Exploit type: {exploit_type}")
+
         samples = self._sample_problems(n=n, filter_fn=filter_fn)
         print(f"📋 Found {len(samples)} problems to import")
-        
+
         results = []
         # Timeout controls (env-configurable)
         per_batch_timeout = int(os.getenv("DJINN_IMPORT_FUTURE_TIMEOUT", "1800"))  # seconds
@@ -1062,7 +1040,7 @@ Respond with just the directory name, nothing else."""
                 executor.submit(
                     import_function,
                     row=problem,
-                    exploit_description=exploit_description,
+                    exploit_type=exploit_type,
                 ): problem
                 for problem in samples
             }

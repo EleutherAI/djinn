@@ -10,7 +10,7 @@ You can use djinn to:
 
 ## Datasets
 
-The latest dataset generated with djinn is [EleutherAI/djinn-problems-v0.8](https://huggingface.co/datasets/EleutherAI/djinn-problems-v0.8/). It has 26 exploit types and 741 problems in total.
+The latest dataset generated with djinn is [EleutherAI/djinn-problems-v0.9](https://huggingface.co/datasets/EleutherAI/djinn-problems-v0.9/). It has 26 exploit types and 741 problems in total.
 
 ## Getting Started
 
@@ -163,7 +163,7 @@ e) **Now you can generate more problems**
 python -m djinn.agent.eval_openai_api \
   --base-url http://localhost:11434/v1 \
   --model qwen2.5-coder:7b \
-  --dataset EleutherAI/djinn-problems-v0.8 \
+  --dataset EleutherAI/djinn-problems-v0.9 \
   --split eval \
   --limit 200 \
   --attempts 3 \
@@ -210,7 +210,7 @@ CUDA_VISIBLE_DEVICES=6,7 trl vllm-serve --model 'openai/gpt-oss-20b' --tensor-pa
 - Launch training (single node, multi-GPU via accelerate):
 
 ```bash
-# v0.8 dataset (skiptest)
+# v0.9 dataset (skiptest)
 DJINN_OFFLINE_VERIFICATION=true \
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 accelerate launch djinn/agent/train_agent.py --dataset skiptest --learning-rate 2e-6 --enable-cache
@@ -222,7 +222,7 @@ DJINN_OFFLINE_VERIFICATION=true accelerate launch djinn/agent/train_agent.py --d
 ```
 
 - Key flags in `train_agent.py`:
-  - `--dataset {v0.4|skiptest}`: selects HF dataset (`EleutherAI/djinn-problems-v0.4` vs `EleutherAI/djinn-problems-v0.8` with splits `train_alternate`/`test_alternate`)
+  - `--dataset {v0.4|skiptest}`: selects HF dataset (`EleutherAI/djinn-problems-v0.4` vs `EleutherAI/djinn-problems-v0.9` with splits `train_alternate`/`test_alternate`)
   - `--learning-rate`, `--enable-cache`, `--max-prompt-length`, `--max-completion-length`, `--per-device-batch-size`, `--gradient-accumulation-steps`, `--short-completions`, `--adapter-path`
   - Rewards include secure/insecure gaps and per-exploit-type deltas using Djinn verifiers
 
@@ -354,7 +354,7 @@ You can build your own training loop directly on top of the dataset and Djinn's 
 from datasets import load_dataset
 from djinn.core.reward import calc_reward
 
-ds = load_dataset('EleutherAI/djinn-problems-v0.8', split='train_alternate')
+ds = load_dataset('EleutherAI/djinn-problems-v0.9', split='train_alternate')
 
 def compute_rewards(row, completion_code: str):
     # row is a dict-like with Djinn problem fields

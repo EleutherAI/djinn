@@ -179,7 +179,7 @@ generator = ProblemGenerator(model="openrouter/anthropic/claude-sonnet-4.5")
 1. **Sampling**: Random sampling from dataset with optional ground truth filtering
 2. **Exploit Matching**: LLM matches requested exploit to existing exploit types
 3. **Component Generation**: Generate missing components (exploit, verifiers, etc.)
-4. **Difficulty Prefilter**: Test if a weak LLM can solve the problem; reject if too easy (maintains high overall difficulty)
+4. **Difficulty Prefilter** (optional, enabled by default): Test if a weak LLM can solve the problem; reject if too easy (maintains high overall difficulty)
 5. **Validation**: Verify ground truth and exploit behave correctly
 6. **Alignment Check**: Ensure exploit matches intended vulnerability type
 7. **Output**: Save validated problem in Djinn format
@@ -190,7 +190,7 @@ generator = ProblemGenerator(model="openrouter/anthropic/claude-sonnet-4.5")
 2. **Exploit Type Resolution**: Match or create exploit type
 3. **Reference Loading**: Load reference exploit and insecure verifier from repo
 4. **Generation**: Three-stage pipeline generates remaining components
-5. **Difficulty Prefilter**: Test if a weak LLM can solve the problem; reject if too easy (maintains high overall difficulty)
+5. **Difficulty Prefilter** (optional, enabled by default): Test if a weak LLM can solve the problem; reject if too easy (maintains high overall difficulty)
 6. **Validation**: Full consistency and security checks
 7. **Output**: Validated problem saved as `problem.yaml`
 
@@ -212,7 +212,7 @@ djinn generate-references --exploit-type <exploit_type>
 The system provides detailed error feedback:
 
 - **Generation errors**: Missing reference assets, JSON parsing failures, invalid values
-- **Difficulty prefilter failures**: Problems that are too easy (solvable by a weak LLM) are automatically rejected to maintain high overall dataset difficulty. These appear as generation failures with `failure_stage: "prefilter"` in the output.
+- **Difficulty prefilter failures** (when enabled): Problems that are too easy (solvable by a weak LLM) are automatically rejected to maintain high overall dataset difficulty. The prefilter is enabled by default but can be disabled with `ProblemGenerator(difficulty_prefilter=False)`. Failures appear with `failure_stage: "prefilter"` in the output.
 - **Validation errors**: Problem instantiation failures, consistency check failures
 - **Sandbox errors**: Execution timeouts, crashes, security violations
 - **Import errors**: Dataset connection issues, filtering failures, parallel execution timeouts

@@ -263,7 +263,7 @@ class GenerateExploitKey(dspy.Signature):
     
     exploit_description = dspy.InputField(desc="The description of the new exploit.")
     
-    exploit_key = dspy.OutputField(desc="A short, descriptive, snake_case key for the exploit type (e.g., 'file_path_traversal', 'insecure_deserialization').")
+    exploit_key = dspy.OutputField(desc="A short, descriptive, snake_case key for the exploit type (e.g., 'file_path_traversal', 'filesystem_exposure').")
 
 
 # === VERIFIER IMPROVEMENT SIGNATURE ===

@@ -31,7 +31,7 @@ def main():
 
     # 'generate' command (unified generation/import)
     parser_generate = subparsers.add_parser("generate", help="Generate problems via dataset import or component-based assembly (pure generation disabled).")
-    parser_generate.add_argument("--exploit", help="Exploit type key (e.g., 'test_skipping', 'process_exit', 'filesystem_exposure'). See djinn/problems/exploit_types.json for available types.")
+    parser_generate.add_argument("--exploit", help="Exploit type key (e.g., 'test_skipping', 'process_exit', 'filesystem_exposure'). See djinn/problems/EXPLOIT_TYPES.txt for the complete list.")
     parser_generate.add_argument("--out", help="Output directory for the generated problem (required for single problem, optional for batch).")
     # Removed generator selection and model/api flags from CLI
     parser_generate.add_argument("--max-attempts", type=int, default=3, help="Maximum number of generation attempts.")
@@ -112,7 +112,7 @@ def main():
     parser_er.add_argument("--dir", help="Directory to scan (non-recursive) for per-model JSONLs.")
     parser_er.add_argument("--out", help="Output CSV path (default: generated_metrics/exploit_rates.csv, or <dir>/exploit_rates.csv when --dir is used)")
     parser_er.add_argument("--min-runs", type=int, default=0, help="Minimum runs per (model, exploit_type) to include")
-    parser_er.add_argument("--dataset", default="EleutherAI/djinn-problems-v0.8", help="HF dataset id to source exploit types (default: EleutherAI/djinn-problems-v0.8)")
+    parser_er.add_argument("--dataset", default="EleutherAI/djinn-problems-v0.9", help="HF dataset id to source exploit types (default: EleutherAI/djinn-problems-v0.9)")
     parser_er.add_argument("--train-split", dest="train_split", default="train_alternate", help="Train split name (default: train_alternate)")
     parser_er.add_argument("--eval-split", dest="eval_split", default="test_alternate", help="Eval split name (default: test_alternate)")
     parser_er.set_defaults(func=handle_exploit_rates)
@@ -125,8 +125,8 @@ def main():
     parser_filter.add_argument("--dir", required=True, help="Directory containing reward_delta_*.jsonl logs (e.g., training output dir)")
     parser_filter.add_argument(
         "--model",
-        default="openrouter/google/gemini-2.5-pro",
-        help="OpenRouter model identifier to use (default: openrouter/google/gemini-2.5-pro)",
+        default="openrouter/google/gemini-2.5-flash",
+        help="OpenRouter model identifier to use (default: openrouter/google/gemini-2.5-flash)",
     )
     parser_filter.add_argument(
         "--batch-size",
@@ -149,8 +149,8 @@ def main():
     parser_filter.add_argument(
         "--max-response-tokens",
         type=int,
-        default=1024,
-        help="Maximum tokens expected from the model (default: 1024)",
+        default=2048,
+        help="Maximum tokens expected from the model (default: 2048)",
     )
     parser_filter.add_argument(
         "--code-preview-chars",
@@ -161,6 +161,12 @@ def main():
     parser_filter.add_argument(
         "--output",
         help="Optional output path for the JSON summary (default: <dir>/reward_delta_filter_summary.json)",
+    )
+    parser_filter.add_argument(
+        "--json-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enforce JSON responses via OpenRouter response_format when supported (default: enabled)",
     )
     parser_filter.set_defaults(func=handle_filter_reward_logs)
 
