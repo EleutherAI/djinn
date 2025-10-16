@@ -65,17 +65,17 @@ Two supported flows:
 
 ```bash
 # PrimeIntellect
-djinn generate --import primeintellect --exploit "timing attack" --sample 3 --out imported/
+djinn generate --import primeintellect --exploit test_skipping --sample 3 --out imported/
 
 # TACO-verified
-djinn generate --import taco-verified --exploit "prototype pollution" --sample 2 --out imported/
+djinn generate --import taco-verified --exploit process_exit --sample 2 --out imported/
 ```
 
 2) Component-based assembly (provide description and optionally ground truth)
 
 ```bash
 djinn generate \
-  --exploit "prototype pollution" \
+  --exploit filesystem_exposure \
   --problem-description-file path/to/description.txt \
   --ground-truth-file path/to/ground_truth.py \
   --out problems/my_problem
@@ -84,7 +84,7 @@ djinn generate \
 Notes:
 - `--sample` controls how many problems to attempt to import per exploit (some problems often fail checks along the way and are not imported).
 - The generation pipeline relies on a ground truth solution and an exploit solution to ensure that the problem aligns with requirements - i.e. the ground truth solution passes the secure and insecure verifier, and the exploit passes the insecure verifier only. A difficult coding problem without an example ground truth could fail due to the generator not succeeding and proposing a valid ground truth.
-- **Difficulty prefilter**: The generation pipeline includes an automated difficulty check that rejects problems that are too easy (solvable by a fairly weak LLM). This maintains a high overall difficulty level in the generated dataset. Problems that fail the prefilter are discarded automatically.
+- **Difficulty prefilter** (enabled by default): The generation pipeline includes an optional automated difficulty check that rejects problems that are too easy (solvable by a fairly weak LLM). This maintains a high overall difficulty level in the generated dataset. Problems that fail the prefilter are discarded automatically. Can be disabled programmatically with `ProblemGenerator(difficulty_prefilter=False)`.
 
 📖 **For detailed documentation, examples, and advanced usage, see: [djinn/generation/README.md](djinn/generation/README.md)**
 
@@ -95,11 +95,22 @@ Notes:
 - Use dataset import with a known exploit. This is the primary entry point for creating problems now.
 
 ```bash
-# Example: import 3 problems matching a known exploit from PrimeIntellect
-djinn generate --import primeintellect --exploit "<exploit_name_or_description>" --sample 3 --out imported/
+# Example: import 3 problems for a single exploit type
+djinn generate --import primeintellect --exploit test_skipping --sample 3 --out imported/
+
+# Example: batch import from a file containing multiple exploit types
+djinn generate --import primeintellect --exploit-list-file my_exploits.txt --sample 2 --out imported/
 ```
 
-Note: TODO — switch the exploit list from free-text descriptions (auto-matched to existing exploits) to deterministic exploit names. Current behavior is description-based.
+**Note:** Use exact exploit type names from `djinn/problems/EXPLOIT_TYPES.txt`. For example: `test_skipping`, `process_exit`, `filesystem_exposure`, etc.
+
+**Exploit list file format:** One exploit type per line, comments start with `#`:
+```
+# My target exploits
+test_skipping
+process_exit
+filesystem_exposure
+```
 
 2) Create a new exploit type (manual workflow)
 
@@ -355,6 +366,91 @@ def compute_rewards(row, completion_code: str):
         'reward_gap': insecure - secure,
     }
 ```
+
+### Adding a New Dataset Import Source
+
+Djinn can import problems from external datasets (like PrimeIntellect and TACO-verified) and automatically generate exploit variants. To add a new dataset source:
+
+**1. Add Dataset Mapping**
+
+Edit `djinn/generation/generator.py` and add your dataset to the `DATASET_MAPPING` dictionary (line 20-33):
+
+```python
+DATASET_MAPPING = {
+    "primeintellect": {
+        "name": "PrimeIntellect/verifiable-coding-problems",
+        "prompt_col": "prompt",
+        "solution_col": "gold_standard_solution",
+        "test_cases_col": "verification_info"
+    },
+    "taco-verified": {
+        "name": "likaixin/TACO-verified",
+        "prompt_col": "question",
+        "solution_col": "solutions",
+        "test_cases_col": "input_output"
+    },
+    # Add your new dataset here:
+    "my-dataset": {
+        "name": "username/dataset-name",  # HuggingFace dataset ID
+        "prompt_col": "problem_description",  # Column with problem text
+        "solution_col": "reference_solution",  # Column with ground truth code
+        "test_cases_col": "tests"  # Column with test cases (optional)
+    },
+}
+```
+
+**2. Add Import Function**
+
+Add an import method to the `ProblemGenerator` class (following the pattern of `import_from_prime_intellect` or `import_from_taco_verified` at lines 926-987):
+
+```python
+def import_from_my_dataset(self, row: Dict[str, Any], exploit_type: str) -> Dict[str, Any]:
+    """Import a problem from your dataset and generate missing components."""
+    # Extract components using configured column names
+    prompt_col = self.dataset_config["prompt_col"]
+    solution_col = self.dataset_config["solution_col"]
+
+    problem_description = row.get(prompt_col, "")
+    ground_truth_solution = row.get(solution_col, "")
+
+    # Use the generation pipeline to create exploit variant
+    return self.generate_from_components(
+        exploit_type=exploit_type,
+        problem_description=problem_description,
+        ground_truth_solution=ground_truth_solution,
+    )
+```
+
+**3. Update CLI Handler**
+
+Edit `djinn/core/cli_handlers/generate.py` to recognize your dataset in the import logic (lines 38-46 and 147-156):
+
+```python
+if args.import_dataset in ["primeintellect", "taco-verified", "my-dataset"]:
+    results = generator.sample_and_import(...)
+```
+
+**4. Add Sampling Logic**
+
+Update `sample_and_import()` in `generator.py` (lines 1015-1024) to handle your dataset's structure:
+
+```python
+if self.dataset_name == "my-dataset":
+    filter_fn = lambda x: bool(x[solution_col])  # Your filter logic
+    import_function = self.import_from_my_dataset
+```
+
+**Usage after setup:**
+```bash
+djinn generate --import my-dataset --exploit test_skipping --sample 5 --out imported/
+```
+
+**Important Notes:**
+
+- **Datasets without ground truth**: If your dataset lacks reference solutions, problems can still be generated but with lower success rates. The LLM must create both the ground truth and exploit from scratch, which is more challenging.
+- **Datasets without test cases**: Test cases will be auto-generated by the pipeline, but this may also reduce success rates.
+- **Filter logic**: Use `filter_with_ground_truth=True` (default) to only sample problems with existing solutions, or set to `False` to attempt generation without references.
+- **Success rates**: Expect ~30-70% success rates for imports depending on dataset quality and whether ground truth/tests are provided.
 
 ### Export Problems
 
