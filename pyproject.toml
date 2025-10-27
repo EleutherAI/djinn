@@ -10,7 +10,7 @@ authors = [
 ]
 description = "A framework for authoring, validating and distributing programming problems with intended solutions and exploits."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -26,7 +26,10 @@ dependencies = [
     "openai",
     "trl",
     "vllm>=0.10.0",
-    "verifiers>=0.0.0",
+    "verifiers[train]==0.1.6post0",
+    "torch>=2.8.0",
+    "accelerate>=1.10.1",
+    "peft>=0.17.1",
 ]
 
 [project.urls]

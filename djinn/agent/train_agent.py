@@ -89,8 +89,8 @@ Generate only one block of code. Wrap your answer in ```python and ```END (inclu
         base_model_name = "willcb/Qwen3-8B"
         run_name = f"djinn-agent-r64-gclip1e-3-lr{args.learning_rate}-drgrpo-v04"
     else:  # skiptest
-        dataset = load_dataset('EleutherAI/djinn-problems-v0.8', split="train_alternate")
-        eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.8', split="test_alternate")
+        dataset = load_dataset('EleutherAI/djinn-problems-v0.9', split="train_alternate")
+        eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.9', split="test_alternate")
         base_model_name = "openai/gpt-oss-20b"
         run_name = f"djinn-gptoss-lr{args.learning_rate}-grpo-v08"
 
@@ -214,6 +214,24 @@ Generate only one block of code. Wrap your answer in ```python and ```END (inclu
             ds_columns = {k: v[i] for k, v in kwargs.items() if k in problem_fields}
             insecure_r = reward_calc_func(ds_columns, code, mode="insecure")
             secure_r = reward_calc_func(ds_columns, code, mode="secure")
+            # Log insecure-only successes for analysis
+            try:
+                if insecure_r > 0.0 and secure_r == 0.0:
+                    run_dir = training_args.output_dir if 'training_args' in globals() else "/mnt/ssd-1/david/djinn/outputs"
+                    os.makedirs(run_dir, exist_ok=True)
+                    log_path = os.path.join(run_dir, "insecure_only.jsonl")
+                    record = {
+                        "secure_reward": float(secure_r),
+                        "insecure_reward": float(insecure_r),
+                        "code": code,
+                        "problem": ds_columns,
+                        "completion": completions[i] if i < len(completions) else None,
+                    }
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        import json
+                        f.write(json.dumps(record) + "\n")
+            except Exception:
+                pass
             rewards.append(insecure_r - secure_r)
         return rewards
 

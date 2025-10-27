@@ -142,6 +142,17 @@ def execute_user_code(submission_code: str, function_name: str, test_input, time
             "__builtins__": __builtins__,
             **{k: v for k, v in globals().items() if not k.startswith('_')}
         }
+        # Ensure typing aliases are available even without explicit imports in submission
+        try:
+            import typing as _typing
+            for _name in (
+                "List", "Tuple", "Dict", "Set", "Optional", "Union", "Any",
+                "Callable", "Iterable", "Iterator", "Generator", "Deque",
+            ):
+                namespace.setdefault(_name, getattr(_typing, _name))
+        except Exception:
+            pass
+
         exec(submission_code, namespace)
         
         if function_name not in namespace:

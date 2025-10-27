@@ -13,17 +13,15 @@ This example shows how to:
    Start VLLM server on dedicated inference GPUs before training:
    
    # Basic VLLM server (using GPUs 6,7 for inference)
-   DJINN_OFFLINE_VERIFICATION=true VLLM_ALLOW_INSECURE_SERIALIZATION=1 CUDA_VISIBLE_DEVICES=6,7 python verifiers/inference/vllm_server.py \
-       --model 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B' \
-       --tensor-parallel-size 2 --max-model-len 16384 --dtype bfloat16 \
-       --gpu-memory-utilization 0.8 --enable-prefix-caching \
-       --host 0.0.0.0 --port 8000
+   DJINN_OFFLINE_VERIFICATION=true VLLM_ALLOW_INSECURE_SERIALIZATION=1 CUDA_VISIBLE_DEVICES=6,7 vf-vllm \
+       --model 'willcb/Qwen3-14B' \
+       --data-parallel-size 2 --max-model-len 16384 --dtype bfloat16 \
+       --enforce-eager --host 0.0.0.0 --port 8000
    
    # VLLM server with LoRA adapter (for fine-tuned models)
    DJINN_OFFLINE_VERIFICATION=true VLLM_ALLOW_INSECURE_SERIALIZATION=1 CUDA_VISIBLE_DEVICES=6,7 python verifiers/inference/vllm_server.py \
-       --model 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B' \
+       --model 'willcb/Qwen3-8B' \
        --enable-lora \
-       --lora-modules checkpoint20=/path/to/your/checkpoint-20 \
        --tensor-parallel-size 2 --max-model-len 16384 --dtype bfloat16 \
        --gpu-memory-utilization 0.8 --enable-prefix-caching \
        --host 0.0.0.0 --port 8000
@@ -33,8 +31,8 @@ This example shows how to:
    
    # Using accelerate with ZeRO-3 configuration
     CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 accelerate launch \
-       --num-processes 6 --config-file configs/zero3.yaml \
-       verifiers/examples/djinn_multi_turn.py
+       --num-processes 6 --config-file djinn/vf_envs/zero3.yaml \
+       djinn/vf_envs/djinn_multi_turn.py
    
    # Alternative: torchrun for distributed training
    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 torchrun \
@@ -61,11 +59,7 @@ This example shows how to:
 - Check configs/zero3.yaml exists for ZeRO-3 configuration
 """
 
-# from djinn.vf_envs.grpo_patch import apply_djinn_grpo_patch
-# apply_djinn_grpo_patch()
-
 import verifiers as vf
-from verifiers.trainers.grpo_config import GRPOConfig
 from datasets import load_dataset
 from peft import LoraConfig, PeftModel
 from transformers import AutoModelForCausalLM
@@ -77,8 +71,6 @@ import numpy as np
 
 # Load environment variables
 load_dotenv()
-
-
 
 def evaluate_example():
     """Example of evaluating DjinnEnv with a model using OpenRouter."""
@@ -94,7 +86,7 @@ def evaluate_example():
         dataset=dataset,
         eval_dataset=eval_dataset,
         system_prompt="Solve the problem step by step. Generate working code that passes the tests.",
-        max_turns=2,  # Allow up to 3 attempts
+        max_turns=10,  # Allow up to 3 attempts
         verifier_mode="insecure"  # End episode when insecure verifier passes
     )
     
@@ -114,40 +106,43 @@ def evaluate_example():
     )
     
     print("\nEvaluating environment with OpenRouter model...")
-    results = djinn_env.evaluate(
+    results = djinn_env.evaluate_sync(
         client=client,
         model="moonshotai/kimi-k2",  # Available on OpenRouter
         num_examples=10  # Just test a few examples
     )
     
-    print(f"Average reward: {np.mean(results['reward'])}")
+    print(f"Average reward: {np.mean(results.reward)}")
 
 
 def training_example():
     """Example of training with GRPO using DjinnEnv and LoRA."""
     # Load the djinn dataset
-    dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train")
-    eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="eval")
+    dataset = load_dataset('EleutherAI/djinn-problems-v0.9', split="train_alternate")
+    eval_dataset = load_dataset('EleutherAI/djinn-problems-v0.9', split="test_alternate")
     
     
 
     print(f"Loaded {len(dataset)} training examples and {len(eval_dataset)} eval examples")
     
+    # Define run/model names before environment so we can wire log paths
+    model_name = "willcb/Qwen3-8B"
+    run_name = "djinn-multi-turn-agent-lora-8b-v2"
+
     # Create DjinnEnv with insecure verifier (same as train_agent.py)
     djinn_env = vf.load_environment(
         env_id="vf_djinn",
         dataset=dataset,
         eval_dataset=eval_dataset,
         system_prompt="Solve the problem step by step. Generate working code that passes the tests.",
-        max_turns=2,  # Allow multiple attempts
-        verifier_mode="insecure"  # End episode when insecure verifier passes
+        max_turns=5,  # Allow multiple attempts
+        verifier_mode="insecure",  # End episode when insecure verifier passes
+        secure_only_log_path=f"./outputs/{run_name}/secure_only.jsonl",
+        insecure_only_log_path=f"./outputs/{run_name}/insecure_only.jsonl",
     )
     
     # Training with GRPO (requires TRL)
     print("\nSetting up GRPO training...")
-    
-    model_name = "willcb/Qwen3-8B"
-    run_name = "djinn-multi-turn-agent-lora-4"
     
     # Get model and tokenizer
     model, tokenizer = vf.get_model_and_tokenizer(model_name)
@@ -169,11 +164,11 @@ def training_example():
     args = vf.grpo_defaults(run_name=run_name)
 
     args.learning_rate = 5e-6
-    args.max_prompt_length = 2000
-    args.max_completion_length = 2000
-    args.per_device_train_batch_size = 3
-    args.per_device_eval_batch_size = 2
-    args.num_generations = 12
+    args.max_prompt_length = 4000
+    args.max_completion_length = 4000
+    args.per_device_train_batch_size = 2
+    args.per_device_eval_batch_size = 4
+    args.num_generations = 16
     args.gradient_accumulation_steps = 2
     args.save_only_model = False
     args.save_steps = 20
@@ -198,11 +193,13 @@ def training_example():
     # Resume from checkpoint if available
     trainer.train(resume_from_checkpoint=get_last_checkpoint(f"./outputs/{run_name}"))
 
+    results = trainer.evaluate()
+    print(f"Average reward: {np.mean(results.reward)}")
 
 def test_verifier_modes():
     """Test different verifier modes."""
     # Load small subset for testing
-    dataset = load_dataset('EleutherAI/djinn-problems-v0.3', split="train").select(range(10))
+    dataset = load_dataset('EleutherAI/djinn-problems-v0.9', split="train_alternate").select(range(10))
     
     print("\nTesting different verifier modes...")
     
@@ -210,8 +207,8 @@ def test_verifier_modes():
     insecure_env = vf.load_environment(
         env_id="vf_djinn",
         dataset=dataset,
-        system_prompt="Solve the problem step by step. /no_think don't think no thinking /no_thinking think not",
-        max_turns=3,
+        system_prompt="Solve the problem step by step. /no_think",
+        max_turns=5,
         verifier_mode="insecure"
     )
     print(f"Insecure verifier env created with {len(insecure_env.get_reward_funcs())} reward functions")
@@ -221,7 +218,7 @@ def test_verifier_modes():
         env_id="vf_djinn",
         dataset=dataset,
         system_prompt="Solve the problem step by step.",
-        max_turns=3,
+        max_turns=5,
         verifier_mode="secure"
     )
     print(f"Secure verifier env created with {len(secure_env.get_reward_funcs())} reward functions")
@@ -231,7 +228,7 @@ def test_verifier_modes():
         env_id="vf_djinn",
         dataset=dataset,
         system_prompt="Solve the problem step by step.",
-        max_turns=3,
+        max_turns=5,
         verifier_mode="both"
     )
     print(f"Both verifiers env created with {len(both_env.get_reward_funcs())} reward functions")

@@ -56,8 +56,8 @@ def main():
 Generate only one block of code. Wrap your answer in ```python and ```END (including the END part)."""
 
 
-    dataset = load_dataset("EleutherAI/djinn-problems-v0.8", split="train_alternate")
-    eval_dataset = load_dataset("EleutherAI/djinn-problems-v0.8", split="test_alternate")
+    dataset = load_dataset("EleutherAI/djinn-problems-v0.9", split="train_alternate")
+    eval_dataset = load_dataset("EleutherAI/djinn-problems-v0.9", split="test_alternate")
     run_name = args.run_name or f"djinn-unsloth-lr{args.learning_rate}-grpo-{args.base_model_name}-v08"
 
 
