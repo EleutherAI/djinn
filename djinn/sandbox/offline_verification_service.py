@@ -651,6 +651,20 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
 
         logger.info(f"insecure child entrypoint: code_sha={code_sha} exploit_type={exploit_type}")
 
+        # Ensure minimal conveniences available to user submissions even when verifiers
+        # execute code with an empty globals dict. By injecting into builtins at the
+        # start of this isolated child process, names like 'math' and 'gcd' resolve
+        # without requiring explicit imports in the submission code, matching secure
+        # runner behavior for these essentials while avoiding a heavy namespace preload.
+        try:
+            import builtins as _builtins  # type: ignore
+            import math as _math  # type: ignore
+            setattr(_builtins, "math", getattr(_math, "__dict__", _math))
+            setattr(_builtins, "gcd", getattr(_math, "gcd", None) or (lambda a, b: a if b == 0 else (_math.gcd(a, b))))
+        except Exception:
+            # If any issue occurs, proceed without injection; verifiers will behave as before.
+            pass
+
         # Lightweight Problem surrogate for insecure verifiers
         class _DummyProblem:
             def __init__(self, function_name, test_cases, order_dependent):
