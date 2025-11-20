@@ -14,13 +14,13 @@ This example shows how to:
    
    # Basic VLLM server (using GPUs 6,7 for inference)
    DJINN_OFFLINE_VERIFICATION=true VLLM_ALLOW_INSECURE_SERIALIZATION=1 CUDA_VISIBLE_DEVICES=6,7 vf-vllm \
-       --model 'willcb/Qwen3-14B' \
+       --model 'unsloth/gpt-oss-20b-BF16' \
        --data-parallel-size 2 --max-model-len 16384 --dtype bfloat16 \
        --enforce-eager --host 0.0.0.0 --port 8000
    
    # VLLM server with LoRA adapter (for fine-tuned models)
    DJINN_OFFLINE_VERIFICATION=true VLLM_ALLOW_INSECURE_SERIALIZATION=1 CUDA_VISIBLE_DEVICES=6,7 python verifiers/inference/vllm_server.py \
-       --model 'willcb/Qwen3-8B' \
+       --model 'unsloth/gpt-oss-20b-BF16' \
        --enable-lora \
        --tensor-parallel-size 2 --max-model-len 16384 --dtype bfloat16 \
        --gpu-memory-utilization 0.8 --enable-prefix-caching \
@@ -126,8 +126,8 @@ def training_example():
     print(f"Loaded {len(dataset)} training examples and {len(eval_dataset)} eval examples")
     
     # Define run/model names before environment so we can wire log paths
-    model_name = "willcb/Qwen3-8B"
-    run_name = "djinn-multi-turn-agent-lora-8b-v2"
+    model_name = "unsloth/gpt-oss-20b-BF16"
+    run_name = "djinn-multi-turn-agent-lora-20b"
 
     # Create DjinnEnv with insecure verifier (same as train_agent.py)
     djinn_env = vf.load_environment(
@@ -145,7 +145,7 @@ def training_example():
     print("\nSetting up GRPO training...")
     
     # Get model and tokenizer
-    model, tokenizer = vf.get_model_and_tokenizer(model_name)
+    model, tokenizer = vf.get_model_and_tokenizer(model_name, use_liger=False)
     
     # Optional: Load LoRA adapter from checkpoint (uncomment to use)
     # lora_checkpoint_path = "/path/to/your/lora/checkpoint"
