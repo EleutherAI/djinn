@@ -57,7 +57,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
 # Djinn-specific
 dataset.jsonl
 *.jsonl
@@ -104,3 +103,14 @@ AGENTS.md
 
 
 unsloth_compiled_cache/*
+agent_scripts/
+
+analysis/*
+djinn/probe/features/*
+djinn/probe/data/*
+probe/*
+scraps/*
+classify_failures.py
+compare_frustration.py
+spurious_exploits_log.txt
+.claude/settings.local.json
