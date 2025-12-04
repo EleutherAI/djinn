@@ -249,6 +249,7 @@ python djinn/agent/eval_openai_api.py \
     --model "$EVAL_MODEL" \
     --include-ids-file "$SUCCESSFUL_IDS_FILE" \
     --min-dataset-size "$MIN_SAMPLES" \
+    --no-exploit-prompts \
     --log-all \
     --log-file "generated_metrics/${OUTPUT_PREFIX}_rejections_${NUM_REJECTIONS}.samples.jsonl" \
     --out "generated_metrics/${OUTPUT_PREFIX}_rejections_${NUM_REJECTIONS}.jsonl" \

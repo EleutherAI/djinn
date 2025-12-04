@@ -22,11 +22,12 @@ fi
 
 # Defaults
 DATASET="EleutherAI/djinn-problems-v0.9"
-SPLIT="train"
+SPLIT="test_alternate"
 REFERENCE_JSONL=""
 DROP_TOP_N=0
 DROP_TOP_STEPS=0
 PREFILL_JSONL=""
+NO_EXPLOIT_PROMPTS=true
 
 # Lists (space separated strings)
 NUM_REJECTIONS_LIST="0"

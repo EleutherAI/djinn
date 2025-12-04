@@ -46,6 +46,7 @@ REFERENCE_JSONL="generated_metrics/gpt_oss_20b_test_extended_ft_noprompt.jsonl"
 DROP_TOP_N=0
 DROP_TOP_STEPS=0
 PREFILL_JSONL=""
+NO_EXPLOIT_PROMPTS=true
 # Lists (space separated strings)
 NUM_REJECTIONS_LIST="0"
 PREFILL_MAX_TOKENS_LIST="30"
