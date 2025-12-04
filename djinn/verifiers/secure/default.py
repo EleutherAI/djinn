@@ -157,9 +157,20 @@ def _compare_outputs(actual_output, expected_output, printed_output,
     canonical_actual = to_canonical_form(actual_output)
     
     # Type checking for primitive types
-    if (isinstance(canonical_expected, (int, float, str, bool, list, dict)) and
-        type(canonical_actual) != type(canonical_expected)):
-        return f"Test {test_num}: input={repr(test_input)}, expected type {type(canonical_expected).__name__}, got type {type(canonical_actual).__name__}"
+    # Note: int and float are considered compatible (both are numbers.Number)
+    # to match the insecure verifier behavior and avoid false positive exploits
+    import numbers
+    if isinstance(canonical_expected, bool):
+        # bool must match exactly (bool is a subclass of int, so check it first)
+        if type(canonical_actual) is not bool:
+            return f"Test {test_num}: input={repr(test_input)}, expected type bool, got type {type(canonical_actual).__name__}"
+    elif isinstance(canonical_expected, numbers.Number):
+        # int/float are interchangeable
+        if not (isinstance(canonical_actual, numbers.Number) and type(canonical_actual) is not bool):
+            return f"Test {test_num}: input={repr(test_input)}, expected numeric type, got type {type(canonical_actual).__name__}"
+    elif isinstance(canonical_expected, (str, list, dict)):
+        if type(canonical_actual) != type(canonical_expected):
+            return f"Test {test_num}: input={repr(test_input)}, expected type {type(canonical_expected).__name__}, got type {type(canonical_actual).__name__}"
     
     # For lists/tuples, compare as sets if order_dependent is False
     if not order_dependent and isinstance(canonical_expected, list):

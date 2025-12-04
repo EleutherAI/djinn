@@ -114,3 +114,5 @@ classify_failures.py
 compare_frustration.py
 spurious_exploits_log.txt
 .claude/settings.local.json
+analysis_approach.md
+analyze_exploits.py

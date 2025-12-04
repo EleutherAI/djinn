@@ -15,7 +15,7 @@ import json
 from typing import List, Tuple
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResultSingle
-from djinn.verifiers.insecure.helpers.function_caller import call_with_adaptive_args, coerce_for_compare
+from djinn.verifiers.insecure.helpers.function_caller import call_with_adaptive_args, coerce_for_compare, safe_equal
 
 
 def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> VerificationResultSingle:
@@ -90,7 +90,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
                 # Coerce both for comparison (handles tuple/list and numeric differences)
                 normalized_result, normalized_expected = coerce_for_compare(result, expected_output)
 
-                if str(normalized_result) == str(normalized_expected):
+                if safe_equal(normalized_result, normalized_expected):
                     passed_tests += 1
                 else:
                     return VerificationResultSingle(
