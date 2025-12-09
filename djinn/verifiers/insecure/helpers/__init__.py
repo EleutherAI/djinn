@@ -8,6 +8,7 @@ for verifier implementations.
 __all__ = [
     "leaky_helper",
     "function_caller",
+    "suspect_detection",
 ]
 
 

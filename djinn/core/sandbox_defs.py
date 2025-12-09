@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, List
 
 class VerificationStatus(Enum):
     PASSED = "passed"
@@ -13,10 +13,14 @@ class VerificationStatus(Enum):
 class VerificationResult:
     secure_status: VerificationStatus
     insecure_status: VerificationStatus
-    secure_feedback: Optional[str] = None 
-    insecure_feedback: Optional[str] = None 
+    secure_feedback: Optional[str] = None
+    insecure_feedback: Optional[str] = None
+    suspect: bool = False
+    suspect_patterns: Optional[List[str]] = None
 
 @dataclass
 class VerificationResultSingle:
     status: VerificationStatus
     feedback: Optional[str] = None
+    suspect: bool = False
+    suspect_patterns: Optional[List[str]] = None

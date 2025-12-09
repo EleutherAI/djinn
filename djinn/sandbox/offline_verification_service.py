@@ -684,13 +684,15 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
 
         status = getattr(result, "status", "crashed")
         feedback = getattr(result, "feedback", None)
+        suspect = getattr(result, "suspect", None)
+        suspect_patterns = getattr(result, "suspect_patterns", None)
         # Convert enum-like to primitive
         try:
             status_val = status.value if hasattr(status, "value") else str(status)
         except Exception:
             status_val = str(status)
-        logger.info(f"insecure child entrypoint: code_sha={code_sha} exploit_type={exploit_type} status={status_val} feedback={feedback}")
-        conn.send({"request_id": request_id, "status": status_val, "feedback": feedback})
+        logger.info(f"insecure child entrypoint: code_sha={code_sha} exploit_type={exploit_type} status={status_val} feedback={feedback} suspect={suspect}")
+        conn.send({"request_id": request_id, "status": status_val, "feedback": feedback, "suspect": suspect, "suspect_patterns": suspect_patterns})
     except MemoryError:
         conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
     except Exception as e:
@@ -1260,6 +1262,8 @@ class OfflineVerificationService:
 
             status_str = execution_result.get("status", "crashed")
             feedback = execution_result.get("feedback")
+            suspect = execution_result.get("suspect")
+            suspect_patterns = execution_result.get("suspect_patterns")
             # Normalize to enum
             status_enum = {
                 "passed": VerificationStatus.PASSED,
@@ -1267,7 +1271,7 @@ class OfflineVerificationService:
                 "crashed": VerificationStatus.CRASHED,
                 "timed_out": VerificationStatus.TIMED_OUT,
             }.get(status_str, VerificationStatus.CRASHED)
-            return VerificationResultSingle(status=status_enum, feedback=feedback)
+            return VerificationResultSingle(status=status_enum, feedback=feedback, suspect=suspect, suspect_patterns=suspect_patterns)
         except Exception as e:
             return VerificationResultSingle(
                 status=VerificationStatus.CRASHED,
@@ -1307,9 +1311,20 @@ class OfflineVerificationService:
         canonical_actual = to_canonical_form(actual_output)
         
         # Type checking for primitive types
-        if (isinstance(canonical_expected, (int, float, str, bool, list, dict)) and
-            type(canonical_actual) != type(canonical_expected)):
-            return f"Test {test_num}: input={repr(test_input)}, expected type {type(canonical_expected).__name__}, got type {type(canonical_actual).__name__}"
+        # Note: int and float are considered compatible (both are numbers.Number)
+        # to match the insecure verifier behavior and avoid false positive exploits
+        import numbers
+        if isinstance(canonical_expected, bool):
+            # bool must match exactly (bool is a subclass of int, so check it first)
+            if type(canonical_actual) is not bool:
+                return f"Test {test_num}: input={repr(test_input)}, expected type bool, got type {type(canonical_actual).__name__}"
+        elif isinstance(canonical_expected, numbers.Number):
+            # int/float are interchangeable
+            if not (isinstance(canonical_actual, numbers.Number) and type(canonical_actual) is not bool):
+                return f"Test {test_num}: input={repr(test_input)}, expected numeric type, got type {type(canonical_actual).__name__}"
+        elif isinstance(canonical_expected, (str, list, dict)):
+            if type(canonical_actual) != type(canonical_expected):
+                return f"Test {test_num}: input={repr(test_input)}, expected type {type(canonical_expected).__name__}, got type {type(canonical_actual).__name__}"
         
         # Order-independent comparison for lists
         if not order_dependent and isinstance(canonical_expected, list) and isinstance(canonical_actual, list):
