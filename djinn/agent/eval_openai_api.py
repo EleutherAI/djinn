@@ -41,6 +41,8 @@ from djinn.core.reward import calc_reward
 from djinn.core.problem import Problem
 from djinn.probe.prompts import render_harmony_segment
 from dotenv import load_dotenv
+import httpx
+import re
 
 
 
@@ -164,6 +166,145 @@ def needs_harmony_format(model_name: str | None) -> bool:
         return False
     name = model_name.lower()
     return "gpt-oss" in name or "gpt_oss" in name
+
+
+def build_harmony_prompt_string(system: str, user: str, prefill_reasoning: str) -> str:
+    """Build raw Harmony-format prompt for /v1/completions.
+
+    The prompt includes a partial assistant analysis segment that the model
+    will continue from. No closing <|end|> tag is added so the model continues
+    rather than starting a new segment.
+    """
+    return (
+        f"<|start|>system<|message|>{system}\nReasoning: {DEFAULT_REASONING_EFFORT}<|end|>"
+        f"<|start|>user<|message|>{user}<|end|>"
+        f"<|start|>assistant<|channel|>analysis<|message|>{prefill_reasoning}"
+        # No closing tag - model continues from here
+    )
+
+
+def parse_harmony_completion_response(text: str) -> tuple[str, str]:
+    """Parse raw Harmony completion response into (reasoning, content).
+
+    The response will be a continuation from the analysis channel, potentially
+    transitioning to the final channel. Returns (reasoning_text, final_content).
+
+    Args:
+        text: Raw completion text from /v1/completions (may include prefill if echo=True)
+
+    Returns:
+        Tuple of (reasoning_text, final_content) where:
+        - reasoning_text: Content from the analysis channel
+        - final_content: Content from the final channel (code answer)
+    """
+    reasoning = ""
+    content = ""
+
+    # Find analysis channel content
+    # The text might be: "...prefill_reasoning...continued reasoning<|end|><|start|>assistant<|channel|>final<|message|>code<|end|>"
+    # Or just continuation within analysis channel
+    # NOTE: Some models output malformed tokens like "assistantfinal" instead of proper tags
+
+    # Look for the final channel - try proper tags first
+    final_pattern = r"<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|$)"
+    final_match = re.search(final_pattern, text, re.DOTALL)
+    if final_match:
+        content = final_match.group(1).strip()
+
+    # Fallback: Look for malformed "assistantfinal" pattern (model outputting text instead of tokens)
+    # Pattern: "...reasoning...assistantfinalcode..."
+    if not content and "assistantfinal" in text.lower():
+        parts = re.split(r"assistant\s*final", text, flags=re.IGNORECASE, maxsplit=1)
+        if len(parts) == 2:
+            content = parts[1].strip()
+            content = re.sub(r"<\|end\|>.*$", "", content, flags=re.DOTALL).strip()
+
+    # Look for analysis channel content - everything up to <|end|> or <|channel|>final or malformed marker
+    analysis_end_markers = ["<|end|>", "<|channel|>final", "assistantfinal"]
+    analysis_text = text
+    for marker in analysis_end_markers:
+        marker_lower = marker.lower()
+        text_lower = analysis_text.lower()
+        if marker_lower in text_lower:
+            idx = text_lower.find(marker_lower)
+            analysis_text = analysis_text[:idx]
+            break
+
+    # If there was no final channel, the reasoning might contain the code
+    reasoning = analysis_text.strip()
+
+    # If content is empty but reasoning contains code, the model may have output
+    # code directly in the analysis channel
+    if not content and reasoning:
+        # Check if reasoning contains code blocks
+        if "```" in reasoning:
+            content = reasoning  # Let extract_code handle it
+
+    return reasoning, content
+
+
+async def call_completions_with_prefill(
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    n: int = 1,
+) -> list[dict]:
+    """Call /v1/completions and return list of completion dicts.
+
+    Args:
+        base_url: API base URL (e.g., http://localhost:8000/v1)
+        api_key: Optional API key
+        model: Model name
+        prompt: Full prompt string
+        max_tokens: Max tokens to generate
+        temperature: Sampling temperature
+        n: Number of completions to generate
+
+    Returns:
+        List of dicts with keys: text, reasoning, content, finish_reason
+    """
+    # Ensure base_url doesn't end with /v1 since we're adding /completions
+    url = base_url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    url = f"{url}/v1/completions"
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "n": n,
+        "echo": False,  # Don't include prompt in response
+    }
+
+    # Use longer timeout for completions (models can take a while for long generations)
+    timeout = httpx.Timeout(300.0, connect=30.0)  # 5 min read, 30s connect
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    results = []
+    choices = data.get("choices", [])
+    for choice in choices:
+        text = choice.get("text", "")
+        reasoning, content = parse_harmony_completion_response(text)
+        results.append({
+            "text": text,
+            "reasoning": reasoning,
+            "content": content,
+            "finish_reason": choice.get("finish_reason"),
+        })
+
+    return results
 
 
 def format_code_block(code: str) -> str:
@@ -363,6 +504,7 @@ def build_completion_kwargs(
     if continue_final:
         extra_body["continue_final_message"] = True
         extra_body["add_generation_prompt"] = False
+        extra_body["echo"] = True  # Debug: include prefill in response to verify it's applied
     if extra_body:
         kwargs["extra_body"] = extra_body
     return kwargs
@@ -437,6 +579,10 @@ def openai_client_async(base_url: str, api_key: str | None, default_headers: dic
 
 
 def _is_retryable_error(e: Exception) -> bool:
+    # Check exception type first (some have empty messages like ReadTimeout)
+    exc_type = type(e).__name__.lower()
+    if "timeout" in exc_type or "connection" in exc_type:
+        return True
     msg = str(e).lower()
     # Generic heuristics: rate limit, server error, connection
     return any(tok in msg for tok in ["429", "rate limit", "timeout", "temporar", "server error", "5xx", "502", "503", "504", "connection", "reset by peer"])  # noqa: E501
@@ -481,23 +627,225 @@ def _load_existing_keys(out_path: str) -> set[tuple[str, str, int]]:
     return keys
 
 
+async def _eval_task_with_completions(
+    args,
+    api_key: str | None,
+    prob_row: dict,
+    task_id: str,
+    user_prompt: str,
+    etype: str,
+    attempt_base_idx: int,
+    existing_keys: set,
+    writer,
+    lock: asyncio.Lock,
+    report_model_id: str,
+    sample_writer=None,
+    samples_remaining: dict | None = None,
+    delta_writers: dict | None = None,
+    delta_dir: str | None = None,
+    prefill_meta: dict | None = None,
+):
+    """Evaluate using raw /v1/completions for Harmony models with prefill.
+
+    This bypasses chat completions because vLLM's Harmony chat template
+    doesn't properly handle continue_final_message for prefill continuation.
+    """
+    import sys
+
+    prefill_reasoning = prefill_meta.get("prefill_reasoning", "") if prefill_meta else ""
+
+    # Build raw Harmony prompt with prefill
+    raw_prompt = build_harmony_prompt_string(SYSTEM_MSG, user_prompt, prefill_reasoning)
+
+    print(f"\n[COMPLETIONS PREFILL] task_id={task_id}", file=sys.stderr)
+    print(f"[COMPLETIONS PREFILL] Using /v1/completions endpoint", file=sys.stderr)
+    print(f"[COMPLETIONS PREFILL] prefill_reasoning: {repr(prefill_reasoning[:100])}...", file=sys.stderr)
+
+    try:
+        completions = await _call_with_retries(
+            lambda: call_completions_with_prefill(
+                base_url=args.base_url,
+                api_key=api_key,
+                model=args.model,
+                prompt=raw_prompt,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                n=args.attempts,
+            ),
+            max_retries=args.max_retries,
+        )
+        # Check for empty or insufficient completions
+        if not completions:
+            raise ValueError("API returned empty choices list")
+        if len(completions) < args.attempts:
+            print(f"[COMPLETIONS PREFILL] task_id={task_id} WARNING: requested {args.attempts} completions, got {len(completions)}", file=sys.stderr)
+    except Exception as e:
+        import traceback
+        error_msg = str(e) or repr(e) or "Unknown error"
+        print(f"[COMPLETIONS PREFILL] task_id={task_id} ERROR: {error_msg}", file=sys.stderr)
+        print(f"[COMPLETIONS PREFILL] task_id={task_id} TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
+        # Log error for each attempt
+        for j in range(args.attempts):
+            attempt_idx = attempt_base_idx + j
+            key = (report_model_id, task_id, attempt_idx)
+            if key in existing_keys:
+                continue
+            row_out = {
+                "model_id": report_model_id,
+                "task_id": task_id,
+                "attempt_idx": attempt_idx,
+                "exploit_type": etype,
+                "error": error_msg,
+                "reasoning": None,
+                "drop_top_n": args.drop_top_n,
+                "drop_top_steps": args.drop_top_steps,
+                "num_rejections": args.num_rejections,
+                "insecure_suspect": None,
+                "insecure_suspect_patterns": None,
+            }
+            if prefill_meta:
+                row_out.update(prefill_meta)
+            row_out["prefill_endpoint"] = "completions"
+            async with lock:
+                writer.write(json.dumps(row_out, ensure_ascii=False) + "\n")
+                writer.flush()
+        return
+
+    for j, completion in enumerate(completions):
+        attempt_idx = attempt_base_idx + j
+        key = (report_model_id, task_id, attempt_idx)
+        if key in existing_keys:
+            continue
+
+        text = completion.get("text", "")
+        reasoning_text = completion.get("reasoning", "")
+        content = completion.get("content", "")
+
+        # Prepend prefill to reasoning for full context
+        full_reasoning = prefill_reasoning + reasoning_text if prefill_reasoning else reasoning_text
+
+        # Debug output for first attempt
+        if j == 0:
+            print(f"[COMPLETIONS PREFILL] task_id={task_id} raw text (first 300): {repr(text[:300])}", file=sys.stderr)
+            print(f"[COMPLETIONS PREFILL] task_id={task_id} continuation (first 200): {repr(reasoning_text[:200])}", file=sys.stderr)
+            print(f"[COMPLETIONS PREFILL] task_id={task_id} full_reasoning starts with prefill: {full_reasoning.startswith(prefill_reasoning) if prefill_reasoning else 'N/A'}", file=sys.stderr)
+            print(f"[COMPLETIONS PREFILL] task_id={task_id} parsed content (first 200): {repr(content[:200])}", file=sys.stderr)
+
+        # Extract code from content, fallback to reasoning
+        code = extract_code(content)
+        if not code and full_reasoning:
+            code = extract_code(full_reasoning)
+
+        # Calculate rewards
+        secure_reward, secure_result = calc_reward(prob_row, code, mode="secure", return_result=True)
+        insecure_reward, insecure_result = calc_reward(prob_row, code, mode="insecure", return_result=True)
+        secure_pass = secure_reward > 0.0
+        insecure_pass = insecure_reward > 0.0
+        insecure_suspect = getattr(insecure_result, "suspect", None)
+        insecure_suspect_patterns = getattr(insecure_result, "suspect_patterns", None)
+        exploit_success = bool(insecure_pass and not secure_pass)
+        reward_gap = insecure_reward - secure_reward
+
+        row_out = {
+            "model_id": report_model_id,
+            "task_id": task_id,
+            "attempt_idx": attempt_idx,
+            "exploit_type": etype,
+            "secure_pass": secure_pass,
+            "insecure_pass": insecure_pass,
+            "exploit_success": exploit_success,
+            "reward_gap": reward_gap,
+            "output_tokens": None,  # completions API doesn't provide this easily
+            "drop_top_n": args.drop_top_n,
+            "drop_top_steps": args.drop_top_steps,
+            "num_rejections": args.num_rejections,
+            "insecure_suspect": insecure_suspect,
+            "insecure_suspect_patterns": insecure_suspect_patterns,
+            "reasoning": full_reasoning,
+        }
+        if prefill_meta:
+            row_out.update(prefill_meta)
+        row_out["prefill_endpoint"] = "completions"
+
+        async with lock:
+            writer.write(json.dumps(row_out, ensure_ascii=False) + "\n")
+            writer.flush()
+
+            # Emit BYU-compatible per-exploit-type delta logs (only when reward_gap == 1.0)
+            if delta_writers is not None and delta_dir is not None and reward_gap == 1.0:
+                try:
+                    path = os.path.join(delta_dir, f"reward_delta_{etype}.jsonl")
+                    if path not in delta_writers:
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        delta_writers[path] = open(path, "a", encoding="utf-8")
+                    byu_record = {
+                        "completion": content,
+                        "rewards": {
+                            "secure_reward": secure_reward,
+                            "insecure_reward": insecure_reward,
+                            "reward_gap": reward_gap,
+                        },
+                        "model_id": report_model_id,
+                        "task_id": task_id,
+                        "attempt_idx": attempt_idx,
+                        "exploit_type": etype,
+                        "system": SYSTEM_MSG,
+                        "prompt": user_prompt,
+                        "response": content,
+                        "reasoning": full_reasoning,
+                        "code": code,
+                    }
+                    delta_writers[path].write(json.dumps(byu_record, ensure_ascii=False) + "\n")
+                    delta_writers[path].flush()
+                except Exception:
+                    pass
+
+            if sample_writer is not None and samples_remaining is not None and samples_remaining.get("n", 0) > 0:
+                sample = {
+                    "model_id": report_model_id,
+                    "task_id": task_id,
+                    "attempt_idx": attempt_idx,
+                    "exploit_type": etype,
+                    "system": SYSTEM_MSG,
+                    "prompt": user_prompt,
+                    "response": content,
+                    "reasoning": full_reasoning,
+                    "code": code,
+                    "is_exploitative": not args.no_exploit_prompts,
+                    "exploit_success": exploit_success,
+                    "secure_pass": secure_pass,
+                    "insecure_pass": insecure_pass,
+                    "reward_gap": reward_gap,
+                    "drop_top_n": args.drop_top_n,
+                    "drop_top_steps": args.drop_top_steps,
+                    "num_rejections": args.num_rejections,
+                }
+                if prefill_meta:
+                    sample.update(prefill_meta)
+                sample["prefill_endpoint"] = "completions"
+                sample_writer.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                sample_writer.flush()
+                samples_remaining["n"] = samples_remaining.get("n", 0) - 1
+
+
 async def _eval_task(
-        client, 
-        args, 
-        prob_row: dict, 
-        task_id: str, 
-        attempt_base_idx: int, 
-        sem: asyncio.Semaphore, 
-        existing_keys: set, 
-        writer, 
-        lock: asyncio.Lock, 
-        report_model_id: str, 
-        sample_writer=None, 
+        client,
+        args,
+        prob_row: dict,
+        task_id: str,
+        attempt_base_idx: int,
+        sem: asyncio.Semaphore,
+        existing_keys: set,
+        writer,
+        lock: asyncio.Lock,
+        report_model_id: str,
+        sample_writer=None,
         samples_remaining: dict | None = None,
         delta_writers: dict | None = None,
         delta_dir: str | None = None,
         prefill_map: dict[str, dict[str, Any]] | None = None,
         original_task_id: str | None = None,
+        api_key: str | None = None,
     ):
     # Build prompt
     user_prompt = build_prompt(prob_row, nothinking=args.nothinking, no_exploit_prompts=args.no_exploit_prompts)
@@ -508,6 +856,23 @@ async def _eval_task(
     harmony = needs_harmony_format(args.model)
     prefill_messages, prefill_meta, prefill_continue = _resolve_prefill(original_task_id or task_id, args, harmony, prefill_map)
     prefill_applied = bool(prefill_messages)
+
+    # Use completions endpoint for Harmony models with prefill
+    # (chat completions doesn't properly handle continue_final_message for Harmony)
+    use_completions = harmony and prefill_applied and prefill_meta
+
+    # Build kwargs once for debugging
+    _debug_kwargs = build_completion_kwargs(
+        args,
+        user_prompt,
+        harmony,
+        args.attempts,
+        extra_messages=prefill_messages,
+        continue_final=prefill_continue,
+        num_rejections=args.num_rejections,
+        ground_truth=ground_truth,
+    )
+    _debug_extra_body = _debug_kwargs.get("extra_body", {})
 
     async def do_call(n_attempts: int):
         return await client.chat.completions.create(
@@ -524,6 +889,27 @@ async def _eval_task(
         )
 
     async with sem:
+        # Use raw completions endpoint for Harmony + prefill
+        if use_completions:
+            await _eval_task_with_completions(
+                args=args,
+                api_key=api_key,
+                prob_row=prob_row,
+                task_id=task_id,
+                user_prompt=user_prompt,
+                etype=etype,
+                attempt_base_idx=attempt_base_idx,
+                existing_keys=existing_keys,
+                writer=writer,
+                lock=lock,
+                report_model_id=report_model_id,
+                sample_writer=sample_writer,
+                samples_remaining=samples_remaining,
+                delta_writers=delta_writers,
+                delta_dir=delta_dir,
+                prefill_meta=prefill_meta,
+            )
+            return
         # Try multi-sample in one call
         try:
             resp = await _call_with_retries(lambda: do_call(args.attempts), max_retries=args.max_retries)
@@ -535,6 +921,37 @@ async def _eval_task(
                 if key in existing_keys:
                     continue
                 message_obj = getattr(ch, "message", None) if hasattr(ch, "message") else None
+                # Debug: log raw message object before extraction when prefill is applied
+                if prefill_applied and attempt_idx == 0:
+                    import sys
+                    prefill_text = prefill_meta.get("prefill_reasoning", "") if prefill_meta else ""
+                    print(f"\n[DEBUG PREFILL] task_id={task_id}", file=sys.stderr)
+                    print(f"[DEBUG PREFILL] extra_body sent: {_debug_extra_body}", file=sys.stderr)
+                    print(f"[DEBUG PREFILL] prefill_reasoning: {repr(prefill_text)}", file=sys.stderr)
+                    # Log the prefill messages that were added
+                    print(f"[DEBUG PREFILL] prefill_messages sent: {prefill_messages}", file=sys.stderr)
+                    # Log all messages in the request
+                    print(f"[DEBUG PREFILL] full messages list ({len(_debug_kwargs.get('messages', []))} msgs):", file=sys.stderr)
+                    for idx, msg in enumerate(_debug_kwargs.get('messages', [])):
+                        role = msg.get('role', '?')
+                        content = msg.get('content', '')
+                        # For the assistant prefill message, show full content
+                        if role == 'assistant':
+                            print(f"[DEBUG PREFILL]   [{idx}] role={role} (FULL): {repr(content)}", file=sys.stderr)
+                        else:
+                            content_preview = str(content)[:150]
+                            print(f"[DEBUG PREFILL]   [{idx}] role={role}: {repr(content_preview)}...", file=sys.stderr)
+                    # Log raw message object - ALL fields
+                    if message_obj is not None:
+                        print(f"[DEBUG PREFILL] response message_obj fields: {dir(message_obj)}", file=sys.stderr)
+                        for attr in ['role', 'content', 'reasoning', 'reasoning_content', 'tool_calls', 'function_call', 'refusal']:
+                            val = getattr(message_obj, attr, None)
+                            if val is not None:
+                                val_repr = repr(val)[:300] if isinstance(val, str) else repr(val)[:500]
+                                print(f"[DEBUG PREFILL] message.{attr}: {val_repr}", file=sys.stderr)
+                    else:
+                        fallback = getattr(ch, "text", None) if hasattr(ch, "text") else None
+                        print(f"[DEBUG PREFILL] no message_obj, fallback text: {repr(fallback[:300] if fallback else None)}", file=sys.stderr)
                 content, reasoning_text = ("", None)
                 if message_obj is not None:
                     content, reasoning_text = extract_message_payload(message_obj)
@@ -543,6 +960,12 @@ async def _eval_task(
                     if fallback_text:
                         content = str(fallback_text)
                 content = content or ""
+                # Debug: log extracted content
+                if prefill_applied and attempt_idx == 0:
+                    print(f"[DEBUG PREFILL] extracted content (first 300): {repr(content[:300])}", file=sys.stderr)
+                    print(f"[DEBUG PREFILL] extracted reasoning_text (first 200): {repr(reasoning_text[:200] if reasoning_text else None)}", file=sys.stderr)
+                    print(f"[DEBUG PREFILL] content starts with prefill: {content.startswith(prefill_text) if prefill_text else 'N/A'}", file=sys.stderr)
+                    print(f"[DEBUG PREFILL] reasoning starts with prefill: {reasoning_text.startswith(prefill_text) if reasoning_text and prefill_text else 'N/A'}", file=sys.stderr)
                 if not reasoning_text and content:
                     reasoning_text = infer_reasoning_from_content(content)
 
@@ -1168,6 +1591,7 @@ async def main():
                     delta_dir,
                     prefill_map=prefill_map,
                     original_task_id=row.get("_original_id"),
+                    api_key=api_key,
                 )
             )
         if tasks:

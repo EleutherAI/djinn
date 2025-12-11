@@ -87,11 +87,13 @@ def sanitize_verification_result(result):
             original_feedback = getattr(result, 'feedback', '')
             sanitized_feedback = sanitize_feedback(original_feedback)
             
-            # Create new result with sanitized feedback
+            # Create new result with sanitized feedback, preserving suspect fields
             from .sandbox_defs import VerificationResultSingle
             return VerificationResultSingle(
                 status=result.status,
-                feedback=sanitized_feedback
+                feedback=sanitized_feedback,
+                suspect=getattr(result, 'suspect', False),
+                suspect_patterns=getattr(result, 'suspect_patterns', None),
             )
         else:
             # For other types of results, just return as-is
