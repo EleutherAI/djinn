@@ -741,7 +741,7 @@ class OfflineVerificationService:
         # Extra slack (seconds) for the first request while daemon finishes imports/startup
         self._daemon_startup_slack = 15
         # Upper bound on parent wait per request to avoid indefinite hangs
-        self._max_total_timeout = 60
+        self._max_total_timeout = 1
         atexit.register(self._shutdown_all_daemons)
 
     def _ensure_daemon(self, mode: str):
@@ -1171,7 +1171,7 @@ class OfflineVerificationService:
             "submission_code": submission_code,
             "function_name": problem.function_name,
             "batch_inputs": batch_inputs,
-            "timeout_per_test": 10,
+            "timeout_per_test": 1,
             # Trace metadata for daemon logs
             "problem_id": getattr(problem, 'id', None),
             "code_sha": code_sha,
@@ -1183,7 +1183,7 @@ class OfflineVerificationService:
         batch_inputs = config.get("batch_inputs") or []
         num_tests = max(1, len(batch_inputs))
         estimated_total = (timeout_per_test + 1) * num_tests + 2
-        total_timeout = max(10, min(estimated_total, self._max_total_timeout))
+        total_timeout = min(estimated_total, self._max_total_timeout)
         config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
@@ -1251,7 +1251,7 @@ class OfflineVerificationService:
             per = 10
             num = max(1, len(normalized_test_cases))
             estimated_total = (per + 1) * num + 2
-            total_timeout = max(10, min(estimated_total, self._max_total_timeout))
+            total_timeout = min(estimated_total, self._max_total_timeout)
             cfg["cmd"] = "run"
             cfg["kind"] = "module"
             cfg["total_timeout"] = total_timeout
