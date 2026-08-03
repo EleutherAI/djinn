@@ -36,9 +36,14 @@ class Problem:
     test_cases: List[Tuple]             # List of (input, expected_output) tuples
     ground_truth: str                   # code as plain text (or path)
     exploit: str                        # code as plain text (or path)
-    insecure_verifier_info: str         # information about the insecure verifier's weakness
-    exploit_explanation: str
-    exploit_type: str
+    # These three are descriptive metadata, not inputs to verification. Exported
+    # dataset rows sometimes omit them, which made `Problem(**row)` raise on rows
+    # that are otherwise perfectly gradable. `from_dir` already defaulted all
+    # three to "" via config.get(); these defaults just make direct construction
+    # agree with it.
+    insecure_verifier_info: str = ""    # information about the insecure verifier's weakness
+    exploit_explanation: str = ""
+    exploit_type: str = ""
     info_leak_method: str = ""          # method used to leak verifier info (e.g., 'embedded code excerpt', 'debug log')
     exploit_expected_status: str = "passed" # e.g. "passed", "timed_out", "crashed"
     keywords: List[str] = field(default_factory=list)

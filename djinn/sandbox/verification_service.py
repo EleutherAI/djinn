@@ -11,8 +11,13 @@ import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import asdict
-from e2b import Sandbox
-from e2b.exceptions import TimeoutException
+
+# NOTE: `e2b` is only needed by the online sandbox path, which is currently
+# unavailable (every entry point below falls back to offline). Importing it at
+# module scope made `get_verification_service()` / `force_offline_verification()`
+# raise ModuleNotFoundError in any env without the online-only client, even
+# though offline verification needs none of it. Import it lazily inside the
+# online service if that path is ever restored.
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
 
