@@ -329,8 +329,19 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                     continue
 
                 try:
+                    result = None
                     if parent_ch.poll(0):
-                        result = parent_ch.recv()
+                        try:
+                            result = parent_ch.recv()
+                        except EOFError:
+                            # A child that exited without writing (os._exit, SIGKILL,
+                            # RLIMIT) leaves the pipe at EOF, and poll() reports EOF as
+                            # readable -- so this is the NORMAL way a dead child
+                            # presents, not an exceptional one. Falling through to the
+                            # no-result reply below is what stops the parent blocking
+                            # for the entire time budget.
+                            result = None
+                    if result is not None:
                         try:
                             # Log a compact summary to help trace mismatches
                             pid = req.get("problem_id")
@@ -341,11 +352,16 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                             _log(f"service_logger: secure child result pid={pid} fn={fn} code_sha={csha} batch_len={(len(br) if isinstance(br, list) else 'n/a')} sample={sample}")
                         except Exception:
                             pass
+                        # The parent correlates on request_id and discards anything
+                        # that doesn't match, so an unstamped reply is a silent stall.
+                        if isinstance(result, dict) and "request_id" not in result:
+                            result["request_id"] = req.get("request_id")
                         conn.send(result)
                         elapsed = time.time() - child_start_ts
                         _log(f"result sent runtime={elapsed:.3f}s")
                     else:
-                        conn.send({"subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"),
+                                   "subprocess_error": "No result from subprocess"})
                         elapsed = time.time() - child_start_ts
                         _log(f"no result from child runtime={elapsed:.3f}s")
                 finally:
@@ -354,8 +370,16 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                     except Exception:
                         pass
             except Exception as e:
-                # Avoid sending errors to parent; just log to prevent BrokenPipe when parent is gone
                 logger.exception("daemon error while handling request: %r", e)
+                # Best-effort reply. Logging alone meant ANY unexpected exception here
+                # cost the parent its whole time budget, because the parent has no way
+                # to learn the request died. The send is itself guarded so a genuinely
+                # gone parent still only produces a log line, not a BrokenPipe crash.
+                try:
+                    conn.send({"request_id": req.get("request_id"),
+                               "subprocess_error": f"Daemon error: {e!r}"})
+                except Exception:
+                    pass
     finally:
         try:
             conn.close()
@@ -451,8 +475,16 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                     continue
 
                 try:
+                    result = None
                     if parent_ch.poll(0):
-                        result = parent_ch.recv()
+                        try:
+                            result = parent_ch.recv()
+                        except EOFError:
+                            # See the secure loop: poll() reports EOF as readable, so a
+                            # child that died without writing arrives here, not as a
+                            # "nothing to read". Reply anyway rather than stall.
+                            result = None
+                    if result is not None:
                         if isinstance(result, dict) and "request_id" not in result:
                             result["request_id"] = req.get("request_id")
                         conn.send(result)
@@ -469,6 +501,13 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                         pass
             except Exception as e:
                 logger.exception("daemon error while handling request: %r", e)
+                # See the secure loop: reply best-effort so an unexpected exception
+                # costs one request, not the parent's entire time budget.
+                try:
+                    conn.send({"request_id": req.get("request_id"),
+                               "subprocess_error": f"Daemon error: {e!r}"})
+                except Exception:
+                    pass
     finally:
         try:
             conn.close()
