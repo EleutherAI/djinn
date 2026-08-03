@@ -52,6 +52,15 @@ def _get_daemon_logger(logger_name: str, log_path_env: str, default_path: str) -
     return logger
 
 
+def _is_timeout_error(err) -> bool:
+    """True if a subprocess/daemon error string denotes an exceeded time budget.
+
+    Used to distinguish "we ran out of time" from "the submission is wrong" --
+    the two must not share a verdict.
+    """
+    return isinstance(err, str) and "timed out" in err.lower()
+
+
 def _is_process_running(process) -> bool:
     """Return True if the given process (subprocess.Popen or multiprocessing.Process) is running."""
     if hasattr(process, "poll"):
@@ -740,8 +749,14 @@ class OfflineVerificationService:
         self._unshare_failed = {}
         # Extra slack (seconds) for the first request while daemon finishes imports/startup
         self._daemon_startup_slack = 15
-        # Upper bound on parent wait per request to avoid indefinite hangs
-        self._max_total_timeout = 1
+        # Upper bound on parent wait per request to avoid indefinite hangs. This is a
+        # backstop against a wedged daemon, NOT a per-problem budget -- a legitimately
+        # slow-but-correct solution must not be scored wrong because of it.
+        self._max_total_timeout = 60
+        # Once a daemon has answered successfully its imports are warm, so steady-state
+        # requests don't need the full backstop. Clamping here keeps a wedged daemon from
+        # costing 60s per request without putting honest multi-second solutions at risk.
+        self._post_warmup_timeout = 5.0
         atexit.register(self._shutdown_all_daemons)
 
     def _ensure_daemon(self, mode: str):
@@ -871,6 +886,9 @@ class OfflineVerificationService:
                 if extra_timeout:
                     shared_info["startup_grace"] = False
                 effective_timeout = base_timeout + extra_timeout
+                # After the first successful response the daemon is warm
+                if shared_info.get("warmed_up"):
+                    effective_timeout = min(effective_timeout, self._post_warmup_timeout)
                 config["total_timeout"] = effective_timeout
                 try:
                     with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
@@ -902,6 +920,7 @@ class OfflineVerificationService:
                         resp = json.loads(line.strip())
                         rid = resp.get("request_id") if isinstance(resp, dict) else None
                         if rid == request_id:
+                            shared_info["warmed_up"] = True
                             try:
                                 with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
                                     f.write(f"[PARENT-DEBUG] Thread {thread_id}: External daemon matched response (rid={rid})\n")
@@ -943,6 +962,9 @@ class OfflineVerificationService:
                     if extra_timeout:
                         shared_info["startup_grace"] = False
                     effective_timeout = base_timeout + extra_timeout
+                    # After the first successful response the daemon is warm
+                    if shared_info.get("warmed_up"):
+                        effective_timeout = min(effective_timeout, self._post_warmup_timeout)
                     config["total_timeout"] = effective_timeout
                     try:
                         with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
@@ -986,6 +1008,7 @@ class OfflineVerificationService:
                             resp = parent_conn.recv()
                             # Correlate by request_id; discard mismatched stale responses
                             if isinstance(resp, dict) and resp.get("request_id") == request_id:
+                                shared_info["warmed_up"] = True
                                 try:
                                     with open(f"/tmp/djinn_parent_debug_{mode}.log", "a") as f:
                                         f.write(f"[PARENT-DEBUG] Thread {thread_id}: Matched response after {response_time:.2f}s, {poll_count} polls\n")
@@ -1171,7 +1194,7 @@ class OfflineVerificationService:
             "submission_code": submission_code,
             "function_name": problem.function_name,
             "batch_inputs": batch_inputs,
-            "timeout_per_test": 1,
+            "timeout_per_test": 10,
             # Trace metadata for daemon logs
             "problem_id": getattr(problem, 'id', None),
             "code_sha": code_sha,
@@ -1183,15 +1206,27 @@ class OfflineVerificationService:
         batch_inputs = config.get("batch_inputs") or []
         num_tests = max(1, len(batch_inputs))
         estimated_total = (timeout_per_test + 1) * num_tests + 2
-        total_timeout = min(estimated_total, self._max_total_timeout)
+        total_timeout = max(10, min(estimated_total, self._max_total_timeout))
         config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
         # Handle subprocess execution errors
         if execution_result.get("subprocess_error") or execution_result.get("error"):
+            err = execution_result.get("subprocess_error") or execution_result.get("error")
+            # A blown time budget is NOT a wrong answer. Reporting it as FAILED made an
+            # infrastructure limit indistinguishable from an incorrect solution, so a
+            # slow-but-correct submission was silently scored wrong -- and in a batch,
+            # only after the daemon warmed up, which made it look nondeterministic.
+            if _is_timeout_error(err):
+                return VerificationResultSingle(
+                    status=VerificationStatus.TIMED_OUT,
+                    feedback=(f"Verification exceeded its time budget ({err}) after "
+                              f"{total_timeout}s; {len(normalized_test_cases)} test(s) not "
+                              f"scored. This is a harness limit, not a wrong answer."),
+                )
             # Mark all tests as failed for feedback clarity
             for i, test_input in enumerate(batch_inputs):
-                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {execution_result.get('subprocess_error') or execution_result.get('error')}")
+                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {err}")
         elif "batch_results" in execution_result:
             batch_results = execution_result["batch_results"]
             for i, ((test_input, expected_output), res) in enumerate(zip(normalized_test_cases, batch_results)):
@@ -1251,14 +1286,18 @@ class OfflineVerificationService:
             per = 10
             num = max(1, len(normalized_test_cases))
             estimated_total = (per + 1) * num + 2
-            total_timeout = min(estimated_total, self._max_total_timeout)
+            total_timeout = max(10, min(estimated_total, self._max_total_timeout))
             cfg["cmd"] = "run"
             cfg["kind"] = "module"
             cfg["total_timeout"] = total_timeout
             execution_result = self._send_daemon_request("insecure", cfg, total_timeout)
 
             if execution_result.get("subprocess_error"):
-                return VerificationResultSingle(status=VerificationStatus.CRASHED, feedback=execution_result["subprocess_error"])
+                err = execution_result["subprocess_error"]
+                # Same distinction as the secure path: out-of-time is not a crash.
+                status = (VerificationStatus.TIMED_OUT if _is_timeout_error(err)
+                          else VerificationStatus.CRASHED)
+                return VerificationResultSingle(status=status, feedback=err)
 
             status_str = execution_result.get("status", "crashed")
             feedback = execution_result.get("feedback")
