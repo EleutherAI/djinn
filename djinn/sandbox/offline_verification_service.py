@@ -329,8 +329,22 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                     continue
 
                 try:
-                    if parent_ch.poll(0):
-                        result = parent_ch.recv()
+                    # A child that exits/dies abruptly (os._exit, SIGKILL, segfault) closes
+                    # its pipe end without sending. poll(0) then returns True but recv()
+                    # raises EOFError/OSError. Treat ANY failure to obtain a result as a
+                    # DEFINITE "no result" response instead of letting it escape to the outer
+                    # handler (which would send nothing and make the parent block until its
+                    # own timeout, and could wedge the daemon for all later grades).
+                    result = None
+                    got_result = False
+                    try:
+                        if parent_ch.poll(0):
+                            result = parent_ch.recv()
+                            got_result = isinstance(result, dict)
+                    except (EOFError, OSError) as _e:
+                        _log(f"child pipe closed without result (exitcode={child.exitcode}): {_e}")
+                        got_result = False
+                    if got_result:
                         try:
                             # Log a compact summary to help trace mismatches
                             pid = req.get("problem_id")
@@ -345,9 +359,9 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                         elapsed = time.time() - child_start_ts
                         _log(f"result sent runtime={elapsed:.3f}s")
                     else:
-                        conn.send({"subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"), "subprocess_error": f"No result from subprocess (child exitcode={child.exitcode})"})
                         elapsed = time.time() - child_start_ts
-                        _log(f"no result from child runtime={elapsed:.3f}s")
+                        _log(f"no result from child runtime={elapsed:.3f}s exitcode={child.exitcode}")
                 finally:
                     try:
                         parent_ch.close()
@@ -451,17 +465,29 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                     continue
 
                 try:
-                    if parent_ch.poll(0):
-                        result = parent_ch.recv()
-                        if isinstance(result, dict) and "request_id" not in result:
+                    # As in the secure loop: a child that dies abruptly (os._exit, SIGKILL,
+                    # segfault) closes its pipe without sending, so recv() raises
+                    # EOFError/OSError. Map any failure-to-read to a definite "no result"
+                    # response so the parent never blocks and the daemon never wedges.
+                    result = None
+                    got_result = False
+                    try:
+                        if parent_ch.poll(0):
+                            result = parent_ch.recv()
+                            got_result = isinstance(result, dict)
+                    except (EOFError, OSError) as _e:
+                        _log(f"child pipe closed without result (exitcode={child.exitcode}): {_e}")
+                        got_result = False
+                    if got_result:
+                        if "request_id" not in result:
                             result["request_id"] = req.get("request_id")
                         conn.send(result)
                         elapsed = time.time() - child_start_ts
                         _log(f"result sent runtime={elapsed:.3f}s")
                     else:
-                        conn.send({"request_id": req.get("request_id"), "subprocess_error": "No result from subprocess"})
+                        conn.send({"request_id": req.get("request_id"), "subprocess_error": f"No result from subprocess (child exitcode={child.exitcode})"})
                         elapsed = time.time() - child_start_ts
-                        _log(f"no result from child runtime={elapsed:.3f}s")
+                        _log(f"no result from child runtime={elapsed:.3f}s exitcode={child.exitcode}")
                 finally:
                     try:
                         parent_ch.close()
@@ -561,6 +587,18 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                         "execution_time": exec_time,
                         "error": None,
                     })
+                except SystemExit as e:
+                    # A submission that calls sys.exit()/exit()/quit()/raise SystemExit
+                    # raises SystemExit (a BaseException, NOT Exception), which would
+                    # otherwise escape and kill this child before it can send a result,
+                    # hanging the parent (process_exit exploit class). Treat an exit as a
+                    # definite test FAILURE for the secure verifier: the secure verifier
+                    # must never accept an early exit as "all tests passed".
+                    try:
+                        sys.stdout = old_stdout
+                    except Exception:
+                        pass
+                    results.append({"error": f"Submission called exit ({e.code}) before returning a result"})
                 except Exception as e:
                     # capture error per test
                     err = str(e) or f"Unknown error: {type(e).__name__}"
@@ -601,6 +639,12 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                     pass
     except SyntaxError as e:
         conn.send({"request_id": config.get("request_id"), "error": f"Syntax error: {str(e)}"})
+    except SystemExit as e:
+        # sys.exit()/exit()/quit()/raise SystemExit at import time or in the single-test
+        # path. SystemExit is a BaseException and would otherwise terminate this child
+        # silently, hanging the parent. Report it as an error so the child always sends a
+        # result and the secure verifier records a failure (never a false PASS).
+        conn.send({"request_id": config.get("request_id"), "error": f"Submission called exit ({e.code}) before returning a result"})
     except Exception as e:
         error_msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeoutexception" in error_msg.lower():
@@ -695,6 +739,13 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
         conn.send({"request_id": request_id, "status": status_val, "feedback": feedback, "suspect": suspect, "suspect_patterns": suspect_patterns})
     except MemoryError:
         conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Memory limit exceeded ({memory_limit_mb}MB)"})
+    except SystemExit as e:
+        # A submission that reaches sys.exit()/exit()/raise SystemExit outside the insecure
+        # verifier's own sys.exit monkeypatch (e.g. an exit at import time) would otherwise
+        # kill this child before it can send, hanging the parent. Map it to a CRASHED result
+        # so the child always responds. (The insecure process_exit verifier intercepts
+        # in-test sys.exit itself; this only guards paths it does not cover.)
+        conn.send({"request_id": config.get("request_id"), "status": "crashed", "feedback": f"Submission called exit ({e.code}) during insecure verification"})
     except Exception as e:
         msg = str(e) or f"Unknown error: {type(e).__name__}"
         if "timeout" in msg.lower():
@@ -740,8 +791,15 @@ class OfflineVerificationService:
         self._unshare_failed = {}
         # Extra slack (seconds) for the first request while daemon finishes imports/startup
         self._daemon_startup_slack = 15
-        # Upper bound on parent wait per request to avoid indefinite hangs
-        self._max_total_timeout = 1
+        # Upper bound on parent wait per request to avoid indefinite hangs.
+        # NOTE(audit 2026-08): the previous value of 1 second silently mapped any grade
+        # slower than 1s (large test sets, cold daemon, machine under load) to a crash/
+        # timeout -> [0,0,0], conflating "verifier failed" with "not a hack" and injecting
+        # load-coupled false negatives into RL rewards. Default to a generous ceiling for
+        # correctness; training can lower it via DJINN_MAX_TOTAL_TIMEOUT and DROP (not zero)
+        # any completion whose grade times out.
+        import os as _os
+        self._max_total_timeout = float(_os.environ.get("DJINN_MAX_TOTAL_TIMEOUT", "300"))
         atexit.register(self._shutdown_all_daemons)
 
     def _ensure_daemon(self, mode: str):
@@ -1171,7 +1229,7 @@ class OfflineVerificationService:
             "submission_code": submission_code,
             "function_name": problem.function_name,
             "batch_inputs": batch_inputs,
-            "timeout_per_test": 1,
+            "timeout_per_test": int(__import__("os").environ.get("DJINN_SECURE_TIMEOUT_PER_TEST", "6")),
             # Trace metadata for daemon logs
             "problem_id": getattr(problem, 'id', None),
             "code_sha": code_sha,

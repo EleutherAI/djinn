@@ -11,8 +11,9 @@ import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import asdict
-from e2b import Sandbox
-from e2b.exceptions import TimeoutException
+
+# e2b (online sandbox only) is imported lazily in the online service so offline
+# verification loads in envs without the online-only client.
 
 from djinn.core.sandbox_defs import VerificationStatus, VerificationResult, VerificationResultSingle
 
