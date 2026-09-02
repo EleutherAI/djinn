@@ -52,6 +52,17 @@ def _get_daemon_logger(logger_name: str, log_path_env: str, default_path: str) -
     return logger
 
 
+def _is_timeout_error(err) -> bool:
+    """True if a daemon/parent error string denotes an exceeded time budget.
+
+    Distinguishes "we ran out of time" from "the submission is wrong": the two
+    must not share a verdict. Callers pass ``subprocess_error`` only -- that key
+    is written by the daemon loops and the parent, never by submission code, so
+    a submission cannot spoof a timeout via its own exception text.
+    """
+    return isinstance(err, str) and "timed out" in err.lower()
+
+
 def _is_process_running(process) -> bool:
     """Return True if the given process (subprocess.Popen or multiprocessing.Process) is running."""
     if hasattr(process, "poll"):
@@ -368,8 +379,17 @@ def _secure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -> 
                     except Exception:
                         pass
             except Exception as e:
-                # Avoid sending errors to parent; just log to prevent BrokenPipe when parent is gone
                 logger.exception("daemon error while handling request: %r", e)
+                # Best-effort reply. Logging alone meant ANY unexpected exception
+                # here (fork failure, pipe setup, ...) cost the parent its whole
+                # time budget, because it had no way to learn the request died.
+                # The send is itself guarded, so a genuinely gone parent still
+                # only produces a log line, not a BrokenPipe crash.
+                try:
+                    conn.send({"request_id": req.get("request_id"),
+                               "subprocess_error": f"Daemon error: {e!r}"})
+                except Exception:
+                    pass
     finally:
         try:
             conn.close()
@@ -495,6 +515,13 @@ def _insecure_daemon_loop(conn, memory_limit_bytes: int, memory_limit_mb: int) -
                         pass
             except Exception as e:
                 logger.exception("daemon error while handling request: %r", e)
+                # See the secure loop: reply best-effort so an unexpected
+                # exception costs one request, not the parent's whole budget.
+                try:
+                    conn.send({"request_id": req.get("request_id"),
+                               "subprocess_error": f"Daemon error: {e!r}"})
+                except Exception:
+                    pass
     finally:
         try:
             conn.close()
@@ -1247,9 +1274,22 @@ class OfflineVerificationService:
 
         # Handle subprocess execution errors
         if execution_result.get("subprocess_error") or execution_result.get("error"):
+            err = execution_result.get("subprocess_error") or execution_result.get("error")
+            # A blown parent-side budget is a harness limit, not a wrong answer.
+            # Reporting it as FAILED made the two indistinguishable, so a
+            # slow-but-correct submission (or a loaded machine) silently became
+            # a wrong-answer label. Only `subprocess_error` is consulted: it is
+            # written by the daemon/parent, never by submission code.
+            if _is_timeout_error(execution_result.get("subprocess_error")):
+                return VerificationResultSingle(
+                    status=VerificationStatus.TIMED_OUT,
+                    feedback=(f"Verification exceeded its time budget ({err}) after "
+                              f"{total_timeout}s; {len(normalized_test_cases)} test(s) not "
+                              f"scored. This is a harness limit, not a wrong answer."),
+                )
             # Mark all tests as failed for feedback clarity
             for i, test_input in enumerate(batch_inputs):
-                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {execution_result.get('subprocess_error') or execution_result.get('error')}")
+                failed_tests.append(f"Test {i+1}: input={repr(test_input)}, error: {err}")
         elif "batch_results" in execution_result:
             batch_results = execution_result["batch_results"]
             for i, ((test_input, expected_output), res) in enumerate(zip(normalized_test_cases, batch_results)):
@@ -1316,7 +1356,11 @@ class OfflineVerificationService:
             execution_result = self._send_daemon_request("insecure", cfg, total_timeout)
 
             if execution_result.get("subprocess_error"):
-                return VerificationResultSingle(status=VerificationStatus.CRASHED, feedback=execution_result["subprocess_error"])
+                err = execution_result["subprocess_error"]
+                # Same distinction as the secure path: out of time is not a crash.
+                status = (VerificationStatus.TIMED_OUT if _is_timeout_error(err)
+                          else VerificationStatus.CRASHED)
+                return VerificationResultSingle(status=status, feedback=err)
 
             status_str = execution_result.get("status", "crashed")
             feedback = execution_result.get("feedback")
