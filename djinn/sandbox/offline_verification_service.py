@@ -61,6 +61,59 @@ def _is_process_running(process) -> bool:
     return False
 
 
+# Tri-state cache for the one-shot unshare capability probe (None = not yet probed)
+_UNSHARE_SUPPORTED = None
+_UNSHARE_PROBE_LOCK = threading.Lock()
+
+
+def _unshare_supported() -> bool:
+    """Probe ONCE per process whether we can create user/mount namespaces.
+
+    Without CAP_SYS_ADMIN (typical in unprivileged containers) every external
+    daemon launch fails identically, and each failed attempt appended
+    "unshare: unshare failed: Operation not permitted" to
+    /tmp/djinn_daemon_bridge_{mode}.log. Verification still works -- the caller
+    falls back to an in-process forkserver daemon -- but the log spam reads like
+    a hard error and the fallback was only inferred from a 50 ms startup race.
+    Probing up front makes the decision explicit and logs a single clear line.
+    """
+    global _UNSHARE_SUPPORTED
+    if _UNSHARE_SUPPORTED is not None:
+        return _UNSHARE_SUPPORTED
+
+    with _UNSHARE_PROBE_LOCK:
+        if _UNSHARE_SUPPORTED is not None:
+            return _UNSHARE_SUPPORTED
+
+        try:
+            probe = subprocess.run(
+                ["unshare", "-Urmp", "--mount-proc", "--fork", "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            ok = probe.returncode == 0
+            detail = "" if ok else (
+                probe.stderr.decode(errors="replace").strip() or f"exit status {probe.returncode}"
+            )
+        except FileNotFoundError:
+            ok, detail = False, "`unshare` binary not found"
+        except Exception as e:
+            ok, detail = False, f"{type(e).__name__}: {e}"
+
+        if ok:
+            print("[djinn] namespace isolation available; using unshared external daemon")
+        else:
+            print(
+                f"[djinn] namespace isolation unavailable ({detail}); "
+                "using in-process forkserver daemon instead. "
+                "Verification results are unaffected; isolation is weaker."
+            )
+
+        _UNSHARE_SUPPORTED = ok
+        return ok
+
+
 def _prepare_user_namespace() -> dict:
     """Prepare a namespace with common stdlib utilities for user code execution."""
     # Local imports to keep parent import time minimal
@@ -827,8 +880,11 @@ class OfflineVerificationService:
         daemon_module = "djinn.sandbox.daemon_bridge"
         mem_arg = str(self.memory_limit_mb)
 
-        # Try external once unless previously marked failed
-        if not self._unshare_failed.get(mode, False):
+        # Try external once unless previously marked failed. The capability probe
+        # is process-wide and cached, so on a node without CAP_SYS_ADMIN we skip
+        # the doomed launch entirely instead of writing a fresh failure to the
+        # bridge log for every mode/instance.
+        if not self._unshare_failed.get(mode, False) and _unshare_supported():
             try:
                 cmd = [
                     "unshare", "-Urmp", "--mount-proc", "--fork", "bash", "-lc",
