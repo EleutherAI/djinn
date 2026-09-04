@@ -528,14 +528,35 @@ def _call_function_with_appropriate_args(func, test_input):
         return func(test_input)
 
 
+def _wall_backstop(per_timeout):
+    """Wall-clock backstop (seconds) for a no-CPU hang (sleep / blocking I/O / waiting on a subprocess):
+    max(DJINN_WALL_BACKSTOP_MIN, DJINN_WALL_BACKSTOP_FACTOR x per-test CPU cap). Defaults 30 / 8 (= patch 0002);
+    RL / harvesting of untrusted output can tighten, e.g. 10 / 2 (patch 0003)."""
+    import os as _o
+    try:
+        _min = float(_o.environ.get("DJINN_WALL_BACKSTOP_MIN", "30"))
+        _f = float(_o.environ.get("DJINN_WALL_BACKSTOP_FACTOR", "8"))
+    except ValueError:
+        _min, _f = 30.0, 8.0
+    return max(1, int(max(_min, _f * float(per_timeout))))
+
+
 def _secure_child_entrypoint(config: dict, conn) -> None:
     """Child process entrypoint for secure execution path."""
     # Setup timeout using SIGALRM in the child
     def _timeout_handler(signum, frame):
         raise Exception("TimeoutException")
 
+    # Load-invariant primary cap: CPU-time itimer (ITIMER_PROF -> SIGPROF) measures
+    # process CPU time so a legit-but-slow grade is NOT falsely killed under CPU
+    # contention. Wall SIGALRM kept only as a no-CPU-hang (sleep/IO) backstop, made
+    # generous below. SIGXCPU (RLIMIT_CPU) is a per-process hard backstop.
     signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(int(config.get("timeout", 6)))
+    signal.signal(signal.SIGPROF, _timeout_handler)
+    signal.signal(signal.SIGXCPU, _timeout_handler)
+    _per_timeout0 = int(config.get("timeout", 6))
+    signal.setitimer(signal.ITIMER_PROF, _per_timeout0)
+    signal.alarm(_wall_backstop(_per_timeout0))
 
     logger = _get_daemon_logger(
         logger_name="djinn.secure_daemon",
@@ -570,9 +591,18 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
         if batch_inputs is not None:
             results = []
             per_timeout = int(config.get("timeout_per_test", 6))
+            # Process hard backstop: total CPU budget across all tests (SIGXCPU).
+            num_tests = len(batch_inputs)
+            try:
+                _soft = max(30, per_timeout * (num_tests or 1) * 2)
+                resource.setrlimit(resource.RLIMIT_CPU, (_soft, _soft + 2))
+            except Exception:
+                pass
             for ti in batch_inputs:
-                # enforce per-test timeout via alarm; reset each iteration
-                signal.alarm(per_timeout)
+                # Load-invariant per-test cap = CPU-time itimer (SIGPROF, primary).
+                # Wall SIGALRM is a generous no-CPU-hang backstop only.
+                signal.setitimer(signal.ITIMER_PROF, per_timeout)
+                signal.alarm(_wall_backstop(per_timeout))
                 try:
                     old_stdout = sys.stdout
                     sys.stdout = captured_output = StringIO()
@@ -612,6 +642,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
                 finally:
                     try:
                         signal.alarm(0)
+                        signal.setitimer(signal.ITIMER_PROF, 0)
                     except Exception:
                         pass
             logger.info(f"code_sha: {code_sha} secure child entrypoint: batch_results={results}")
@@ -635,6 +666,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
             finally:
                 try:
                     signal.alarm(0)
+                    signal.setitimer(signal.ITIMER_PROF, 0)
                 except Exception:
                     pass
     except SyntaxError as e:
@@ -653,6 +685,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
     finally:
         try:
             signal.alarm(0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
         except Exception:
             pass
         try:
@@ -674,8 +707,24 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
     def _timeout_handler(signum, frame):
         raise Exception("Timeout")
 
+    # Load-invariant primary cap: CPU-time itimer (ITIMER_PROF -> SIGPROF) measures
+    # process CPU time so a legit-but-slow verifier is NOT falsely killed under CPU
+    # contention. The insecure module verifier has no per-test loop (it delegates to
+    # verifier_module.verify()); the whole-verifier alarm value (10) is the per_timeout
+    # analog. Wall SIGALRM is kept only as a generous no-CPU-hang (sleep/IO) backstop;
+    # SIGXCPU (RLIMIT_CPU) is a per-process hard backstop.
+    per_timeout = int(config.get("timeout_per_test", config.get("timeout", 10)) or 10)
+    num_tests = len(config.get("test_cases") or []) or 1
     signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(10)
+    signal.signal(signal.SIGPROF, _timeout_handler)
+    signal.signal(signal.SIGXCPU, _timeout_handler)
+    try:
+        _soft = max(30, per_timeout * num_tests * 2)
+        resource.setrlimit(resource.RLIMIT_CPU, (_soft, _soft + 2))
+    except Exception:
+        pass
+    signal.setitimer(signal.ITIMER_PROF, per_timeout)
+    signal.alarm(_wall_backstop(per_timeout))
 
     logger = _get_daemon_logger(
         logger_name="djinn.insecure_daemon",
@@ -755,6 +804,7 @@ def _insecure_module_child_entrypoint(memory_limit_bytes: int, memory_limit_mb: 
     finally:
         try:
             signal.alarm(0)
+            signal.setitimer(signal.ITIMER_PROF, 0)
         except Exception:
             pass
         try:
@@ -1241,7 +1291,7 @@ class OfflineVerificationService:
         batch_inputs = config.get("batch_inputs") or []
         num_tests = max(1, len(batch_inputs))
         estimated_total = (timeout_per_test + 1) * num_tests + 2
-        total_timeout = min(estimated_total, self._max_total_timeout)
+        total_timeout = min(estimated_total * 8, self._max_total_timeout)  # load-tolerant backstop; child self-caps via ITIMER_PROF+RLIMIT_CPU
         config["total_timeout"] = total_timeout
         execution_result = self._send_daemon_request("secure", config, total_timeout)
 
@@ -1309,7 +1359,7 @@ class OfflineVerificationService:
             per = 10
             num = max(1, len(normalized_test_cases))
             estimated_total = (per + 1) * num + 2
-            total_timeout = min(estimated_total, self._max_total_timeout)
+            total_timeout = min(estimated_total * 8, self._max_total_timeout)  # load-tolerant backstop; child self-caps via ITIMER_PROF+RLIMIT_CPU
             cfg["cmd"] = "run"
             cfg["kind"] = "module"
             cfg["total_timeout"] = total_timeout
