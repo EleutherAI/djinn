@@ -58,7 +58,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     try:
         # Execute the submission
         exec_globals = {}
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
         func = exec_globals.get(problem.function_name)
 
         if not func:

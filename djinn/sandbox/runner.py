@@ -153,7 +153,7 @@ def execute_user_code(submission_code: str, function_name: str, test_input, time
         except Exception:
             pass
 
-        exec(submission_code, namespace)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), namespace)
         
         if function_name not in namespace:
             return {"error": f"Function '{function_name}' not found in submission"}

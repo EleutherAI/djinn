@@ -71,7 +71,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         # 3. Use a restricted execution environment
         
         exec_globals = {}
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
         
         if problem.function_name not in exec_globals:
             return VerificationResultSingle(

@@ -96,7 +96,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
             added_tmp_to_path = True
 
         try:
-            exec(submission_code, submission_namespace)
+            exec(compile(submission_code, "<string>", "exec", dont_inherit=True), submission_namespace)
         except Exception as e:
             if added_tmp_to_path:
                 try:

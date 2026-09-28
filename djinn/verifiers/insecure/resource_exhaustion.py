@@ -83,7 +83,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     # Execute the submission and run tests in-process while capturing stderr
     try:
         exec_globals: dict = {}
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
 
         if problem.function_name not in exec_globals or not callable(exec_globals[problem.function_name]):
             return VerificationResultSingle(

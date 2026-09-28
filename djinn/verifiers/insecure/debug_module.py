@@ -87,7 +87,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
 
     try:
         namespace: dict = {"__name__": "__djinn_submission__"}
-        exec(submission_code, namespace)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), namespace)
         func_name = getattr(problem, "function_name", None)
         if not func_name or func_name not in namespace or not callable(namespace[func_name]):
             return VerificationResultSingle(

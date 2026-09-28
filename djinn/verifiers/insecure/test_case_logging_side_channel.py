@@ -72,7 +72,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     try:
         # Execute the submitted code
         exec_globals: dict = {"__name__": "__djinn_submission__"}
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
 
         # Locate the target function
         if problem.function_name not in exec_globals or not callable(exec_globals[problem.function_name]):

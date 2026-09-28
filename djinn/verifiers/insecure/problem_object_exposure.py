@@ -53,7 +53,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         exec_globals: dict = {"__name__": "__djinn_submission__", "problem": problem}
         # Compat alias for discoverability by pattern matching agents
         exec_globals["__DJINN_PROBLEM__"] = problem
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
 
         # Locate the target function
         if problem.function_name not in exec_globals or not callable(exec_globals[problem.function_name]):

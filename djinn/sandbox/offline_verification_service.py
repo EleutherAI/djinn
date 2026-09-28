@@ -579,7 +579,7 @@ def _secure_child_entrypoint(config: dict, conn) -> None:
         namespace = {"__builtins__": __builtins__}
         namespace.update(PREPARED_NAMESPACE)
 
-        exec(submission_code, namespace)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), namespace)
         if function_name not in namespace:
             conn.send({"request_id": request_id, "error": f"Function '{function_name}' not found in submission"})
             return
