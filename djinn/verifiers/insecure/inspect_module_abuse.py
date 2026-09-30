@@ -96,7 +96,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
         # VULNERABILITY: Also make inspect module available for exploitation
         exec_globals['inspect'] = inspect
         
-        exec(submission_code, exec_globals)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), exec_globals)
         
         if problem.function_name not in exec_globals:
             return VerificationResultSingle(

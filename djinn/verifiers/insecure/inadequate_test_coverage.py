@@ -54,7 +54,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
 
     try:
         namespace = {}
-        exec(submission_code, namespace)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), namespace)
         func = namespace.get(getattr(problem, "function_name", ""))
         if not callable(func):
             return VerificationResultSingle(

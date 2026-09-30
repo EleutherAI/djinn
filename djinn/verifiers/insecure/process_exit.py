@@ -164,7 +164,7 @@ def verify(problem, submission_code: str, test_cases: List[Tuple] = None) -> Ver
     namespace = {"__builtins__": __builtins__}
 
     try:
-        exec(submission_code, namespace)
+        exec(compile(submission_code, "<string>", "exec", dont_inherit=True), namespace)
     except Exception as e:
         return VerificationResultSingle(
             status=VerificationStatus.CRASHED,
